@@ -149,8 +149,6 @@ export function UsagePage() {
           </div>
         ) : merged ? (
           <>
-            <SourceNotice sources={merged.sources} pricing={merged.pricing} />
-
             <section className="grid gap-6 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
               <div className="flex flex-col gap-5">
                 <div className="flex flex-col gap-1">
@@ -455,34 +453,6 @@ function QualityRow({ label, value }: { label: string; value: string }) {
     <div className="flex items-center justify-between gap-3 text-muted-foreground">
       <span>{label}</span>
       <span className="tabular-nums text-foreground">{value}</span>
-    </div>
-  );
-}
-
-function SourceNotice({
-  sources,
-  pricing,
-}: {
-  sources: MergedUsage["sources"];
-  pricing: MergedUsage["pricing"];
-}) {
-  const notes = sources
-    .filter((source) => source.status !== "ok")
-    .map((source) => {
-      if (source.status === "missing") {
-        return `${PROVIDER_LABEL[source.provider]} transcripts not found.`;
-      }
-      return `${PROVIDER_LABEL[source.provider]} scan was ${source.status}.`;
-    });
-  if (pricing.status === "unavailable") {
-    notes.push("Model rate table unavailable; unpriced models show $0.");
-  }
-  if (notes.length === 0) return null;
-  return (
-    <div className="flex flex-col gap-1 border border-border px-3 py-2 text-xs text-muted-foreground">
-      {notes.map((note) => (
-        <span key={note}>{note}</span>
-      ))}
     </div>
   );
 }
