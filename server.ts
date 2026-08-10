@@ -3,7 +3,11 @@ import * as NodePath from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
 
-import { makeWindow } from "./lib/format";
+import {
+  assertValidWindow,
+  isValidTimeZone,
+  makeWindow,
+} from "./lib/format";
 import { mergedUsageSchema } from "./lib/rpc-schema";
 import { UsageScanner } from "./lib/scan";
 
@@ -11,13 +15,21 @@ export const rpcContract = defineRpcContract({
   getUsage: {
     input: z
       .object({
-        days: z.union([z.literal(7), z.literal(30), z.literal(90)]),
-        timeZone: z.string().min(1),
+        timeZone: z
+          .string()
+          .min(1)
+          .refine((value) => isValidTimeZone(value), {
+            message: "Invalid IANA time zone",
+          }),
         sinceDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
         untilDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
         force: z.boolean().optional(),
       })
-      .strict(),
+      .strict()
+      .refine((value) => value.sinceDay <= value.untilDay, {
+        message: "sinceDay must be on or before untilDay",
+        path: ["sinceDay"],
+      }),
     output: mergedUsageSchema,
   },
 });
@@ -41,6 +53,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     async getUsage({ sinceDay, untilDay, timeZone, force }) {
+      assertValidWindow({ sinceDay, untilDay, timeZone });
       const { merged } = await scanner.readSummary({
         sinceDay,
         untilDay,

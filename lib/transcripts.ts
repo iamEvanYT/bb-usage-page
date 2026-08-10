@@ -97,8 +97,12 @@ export function initialCodexScanState(): CodexScanState {
 
 const FORK_COPY_MAX_GAP_MS = 1000;
 
-function isForkedSessionMeta(payload: Record<string, unknown>): boolean {
-  if (typeof payload.forked_from_id === "string") return true;
+/**
+ * Only subagent thread_spawn rollouts copy parent history in a burst.
+ * Plain `forked_from_id` (e.g. editor resume) must not suppress the first second
+ * of genuine usage.
+ */
+function isSubagentSpawnMeta(payload: Record<string, unknown>): boolean {
   const source = payload.source;
   if (typeof source !== "object" || source === null) return false;
   const subagent = (source as Record<string, unknown>).subagent;
@@ -130,7 +134,7 @@ export function parseCodexLine(
     const id = payloadRecord.id ?? payloadRecord.session_id;
     if (typeof id === "string") state.sessionId = id;
     const metaTimestampMs = parseTimestampMs(record.timestamp);
-    if (metaTimestampMs !== null && isForkedSessionMeta(payloadRecord)) {
+    if (metaTimestampMs !== null && isSubagentSpawnMeta(payloadRecord)) {
       state.suppressingForkCopies = true;
       state.forkCopyAnchorMs = metaTimestampMs;
     }

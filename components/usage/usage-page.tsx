@@ -38,20 +38,23 @@ export function UsagePage() {
   const [refreshing, setRefreshing] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const hasLoadedRef = useRef(false);
+  const forceRefreshRef = useRef(false);
 
   const window = useMemo(() => makeWindow(windowDays), [windowDays]);
 
   useEffect(() => {
     let cancelled = false;
+    const force = forceRefreshRef.current;
+    forceRefreshRef.current = false;
     if (hasLoadedRef.current) setRefreshing(true);
     else setLoading(true);
     setError(null);
     void rpc
       .call("getUsage", {
-        days: windowDays,
         timeZone: window.timeZone,
         sinceDay: window.sinceDay,
         untilDay: window.untilDay,
+        force,
       })
       .then((result) => {
         if (!cancelled) {
@@ -128,7 +131,10 @@ export function UsagePage() {
             </div>
             <button
               type="button"
-              onClick={() => setReloadKey((value) => value + 1)}
+              onClick={() => {
+                forceRefreshRef.current = true;
+                setReloadKey((value) => value + 1);
+              }}
               aria-label="Refresh usage"
               disabled={refreshing}
               className={cn(
@@ -263,11 +269,7 @@ export function UsagePage() {
               <Metric
                 label="Cache savings"
                 value={formatUsd(merged.costQuality.cacheSavingsUsd)}
-                detail={
-                  merged.costUsd > 0
-                    ? `${(merged.costQuality.cacheSavingsUsd / merged.costUsd).toFixed(1)}x the raw token cost`
-                    : "vs full input rates"
-                }
+                detail="vs full (uncached) input rates"
               />
             </section>
 

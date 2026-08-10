@@ -23,10 +23,18 @@ Cache files live under `~/.bb/plugins/usage/`.
 
 ## Install
 
+Path installs build from source automatically:
+
 ```bash
 bb plugin install .
-# or after publish:
-# bb plugin install git:<repo-url>@main
+```
+
+For git/npm installs, commit (or publish) a fresh `dist/` from `npm run build`.
+bb prefers `dist/` when present and the SDK major matches.
+
+```bash
+npm run build
+bb plugin install git:<repo-url>@main
 ```
 
 Open **Usage** in the bb sidebar, or run:
@@ -42,11 +50,12 @@ npm install
 bb plugin install .
 bb plugin dev          # rebuild + reload on save
 npm run typecheck
-npm run build          # writes dist/ for git/npm installs
+npm run build          # refresh dist/ before publishing
 ```
 
 ## Notes
 
 - Costs are **raw API-equivalent** estimates, not subscription invoices.
 - `<synthetic>` Claude transcript rows are ignored (local/non-billed).
-- `--force` re-aggregates the window but still skips re-parsing unchanged files.
+- Refresh / `--force` clears the durable parse cache and re-reads transcripts.
+- Warm requests within ~10s reuse the last summary without walking the filesystem.

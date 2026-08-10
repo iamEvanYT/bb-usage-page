@@ -1,7 +1,10 @@
 import type { UsageProviderKind, UsageRecord } from "./types";
 
-/** Bump when parse semantics change so stale entries are discarded. */
-export const USAGE_SCAN_CACHE_VERSION = 1 as const;
+/**
+ * Bump when parse / filter semantics change so durable entries are discarded.
+ * v2: ignore `<synthetic>`; Codex fork suppression is subagent-only.
+ */
+export const USAGE_SCAN_CACHE_VERSION = 2 as const;
 
 export interface CachedFile {
   size: number;

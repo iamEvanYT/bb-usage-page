@@ -43,7 +43,12 @@ const RATES_TTL_MS = 24 * 60 * 60 * 1000;
 const MTIME_SLACK_MS = 36 * 60 * 60 * 1000;
 const CACHE_RETENTION_DAYS = 90;
 /** Bump when aggregation filters change so in-memory summaries rebuild. */
-const SUMMARY_CACHE_VERSION = 2;
+const SUMMARY_CACHE_VERSION = 3;
+/**
+ * Serve a warm summary without walking the filesystem. Fresh agent turns can
+ * lag up to this window until the next walk; manual refresh passes force.
+ */
+const SUMMARY_HOT_TTL_MS = 10_000;
 
 const EMPTY_CACHE_STATS = {
   summaryHit: false,
@@ -67,8 +72,17 @@ export interface ReadSummaryOptions {
   sinceDay: string;
   untilDay: string;
   timeZone: string;
-  /** When true, ignore summary cache and re-aggregate (still uses file cache). */
+  /**
+   * Bust summary cache and drop the durable file-parse cache so transcripts
+   * are re-read from disk.
+   */
   force?: boolean;
+}
+
+interface FileScanStats {
+  fileHits: number;
+  fileMisses: number;
+  filesParsed: number;
 }
 
 export interface ScanStats {
@@ -223,6 +237,8 @@ interface SummaryCacheEntry {
   fingerprint: string;
   ratesKey: string;
   merged: MergedUsage;
+  computedAtMs: number;
+  fileCount: number;
 }
 
 export class UsageScanner {
@@ -282,6 +298,18 @@ export class UsageScanner {
     await this.persistFileCache();
   }
 
+  private async clearFileCache(): Promise<void> {
+    this.fileCache = new Map();
+    this.fileCacheDirty = false;
+    this.summaryCache.clear();
+    try {
+      await NodeFSP.unlink(this.scanCachePath);
+    } catch {
+      // absent
+    }
+    this.log("cleared durable scan cache");
+  }
+
   private async ensureRates(): Promise<void> {
     const now = Date.now();
     if (
@@ -336,7 +364,12 @@ export class UsageScanner {
       // Rate changes invalidate priced summaries.
       this.summaryCache.clear();
     } catch {
-      if (this.rates.size > 0) this.ratesStatus = "cached";
+      if (this.rates.size > 0) {
+        this.ratesStatus = "cached";
+        // TTL elapsed but refresh failed — do not keep serving priced summaries
+        // as if rates were still fresh.
+        this.summaryCache.clear();
+      }
     }
   }
 
@@ -344,16 +377,47 @@ export class UsageScanner {
     return `${this.ratesFetchedAtMs ?? 0}:${this.rates.size}:${this.ratesStatus}`;
   }
 
+  private summaryKey(input: ReadSummaryOptions): string {
+    return `${SUMMARY_CACHE_VERSION}|${input.sinceDay}|${input.untilDay}|${input.timeZone}`;
+  }
+
   private async collectFiles(
     roots: readonly string[],
     sinceMs: number,
+    sinceDay: string,
+    untilDay: string,
+    timeZone: string,
   ): Promise<{ files: TranscriptFile[]; roots: string[] }> {
     if (roots.length === 0) return { files: [], roots: [] };
-    const files: TranscriptFile[] = [];
+    const byPath = new Map<string, TranscriptFile>();
     for (const root of roots) {
-      files.push(...(await listTranscriptFiles(root, sinceMs)));
+      for (const file of await listTranscriptFiles(root, sinceMs)) {
+        byPath.set(file.path, file);
+      }
     }
-    return { files, roots: [...roots] };
+
+    // Restored/copied transcripts can have stale mtimes. If we already parsed
+    // them, keep them in the window when their records land inside it.
+    for (const [path, entry] of this.fileCache) {
+      if (byPath.has(path)) continue;
+      if (!roots.some((root) => path === root || path.startsWith(`${root}/`))) {
+        continue;
+      }
+      const inWindow = entry.records.some((record) => {
+        if (isIgnoredUsageModel(record.model)) return false;
+        const day = dayInTimeZone(record.timestampMs, timeZone);
+        return day >= sinceDay && day <= untilDay;
+      });
+      if (inWindow) {
+        byPath.set(path, {
+          path,
+          size: entry.size,
+          mtimeMs: entry.mtimeMs,
+        });
+      }
+    }
+
+    return { files: [...byPath.values()], roots: [...roots] };
   }
 
   private async recordsForFiles(
@@ -362,10 +426,18 @@ export class UsageScanner {
     sinceDay: string,
     untilDay: string,
     timeZone: string,
-    stats: ScanStats,
-  ): Promise<{ records: UsageRecord[]; source: UsageSource }> {
+  ): Promise<{
+    records: UsageRecord[];
+    source: UsageSource;
+    stats: FileScanStats;
+  }> {
     const records: UsageRecord[] = [];
     const sessions = new Set<string>();
+    const stats: FileScanStats = {
+      fileHits: 0,
+      fileMisses: 0,
+      filesParsed: 0,
+    };
     let skippedFiles = 0;
     let failed = false;
 
@@ -388,7 +460,9 @@ export class UsageScanner {
           failed = true;
           continue;
         }
-        fileRecords = dedupeWithinFile(parsed);
+        fileRecords = dedupeWithinFile(parsed).filter(
+          (record) => !isIgnoredUsageModel(record.model),
+        );
         this.fileCache.set(file.path, {
           size: file.size,
           mtimeMs: file.mtimeMs,
@@ -410,6 +484,7 @@ export class UsageScanner {
 
     return {
       records,
+      stats,
       source: {
         provider,
         path: "(pending)",
@@ -422,6 +497,48 @@ export class UsageScanner {
     };
   }
 
+  private hitSummary(
+    cached: SummaryCacheEntry,
+    started: number,
+    fileHits: number,
+  ): {
+    summary: UsageSummary;
+    merged: MergedUsage;
+    stats: ScanStats;
+  } {
+    const merged = {
+      ...cached.merged,
+      scanDurationMs: Date.now() - started,
+      readAt: new Date().toISOString(),
+      cache: {
+        ...EMPTY_CACHE_STATS,
+        summaryHit: true,
+        fileHits,
+      },
+    };
+    return {
+      summary: {
+        readAt: merged.readAt,
+        timeZone: merged.timeZone,
+        sinceDay: merged.sinceDay,
+        untilDay: merged.untilDay,
+        buckets: [],
+        sources: merged.sources,
+        pricing: merged.pricing,
+        scanDurationMs: merged.scanDurationMs,
+        sessions: merged.sessions,
+      },
+      merged,
+      stats: {
+        fileHits,
+        fileMisses: 0,
+        filesParsed: 0,
+        summaryHit: true,
+        fingerprint: cached.fingerprint,
+      },
+    };
+  }
+
   async readSummary(input: ReadSummaryOptions): Promise<{
     summary: UsageSummary;
     merged: MergedUsage;
@@ -429,7 +546,34 @@ export class UsageScanner {
   }> {
     const started = Date.now();
     await this.ensureFileCacheLoaded();
+
+    if (input.force) {
+      await this.clearFileCache();
+      this.fileCacheLoaded = true;
+    }
+
     await this.ensureRates();
+
+    const summaryKey = this.summaryKey(input);
+    const ratesKey = this.ratesKey();
+    const cachedSummary = this.summaryCache.get(summaryKey);
+
+    // Hot path: no filesystem walk when the same window was just computed.
+    if (
+      !input.force &&
+      cachedSummary &&
+      cachedSummary.ratesKey === ratesKey &&
+      Date.now() - cachedSummary.computedAtMs < SUMMARY_HOT_TTL_MS
+    ) {
+      this.log(
+        `usage hot cache ${input.sinceDay}..${input.untilDay} in ${Date.now() - started}ms`,
+      );
+      return this.hitSummary(
+        cachedSummary,
+        started,
+        cachedSummary.fileCount,
+      );
+    }
 
     const sinceMs = windowStartMs(input.sinceDay);
     const [claudeDirs, codexDirs, piDirs] = await Promise.all([
@@ -439,9 +583,27 @@ export class UsageScanner {
     ]);
 
     const [claudeFiles, codexFiles, piFiles] = await Promise.all([
-      this.collectFiles(claudeDirs, sinceMs),
-      this.collectFiles(codexDirs, sinceMs),
-      this.collectFiles(piDirs, sinceMs),
+      this.collectFiles(
+        claudeDirs,
+        sinceMs,
+        input.sinceDay,
+        input.untilDay,
+        input.timeZone,
+      ),
+      this.collectFiles(
+        codexDirs,
+        sinceMs,
+        input.sinceDay,
+        input.untilDay,
+        input.timeZone,
+      ),
+      this.collectFiles(
+        piDirs,
+        sinceMs,
+        input.sinceDay,
+        input.untilDay,
+        input.timeZone,
+      ),
     ]);
 
     const allFiles = [
@@ -450,17 +612,6 @@ export class UsageScanner {
       ...piFiles.files,
     ];
     const fingerprint = fingerprintFiles(allFiles);
-    const summaryKey = `${SUMMARY_CACHE_VERSION}|${input.sinceDay}|${input.untilDay}|${input.timeZone}`;
-    const ratesKey = this.ratesKey();
-    const cachedSummary = this.summaryCache.get(summaryKey);
-
-    const stats: ScanStats = {
-      fileHits: 0,
-      fileMisses: 0,
-      filesParsed: 0,
-      summaryHit: false,
-      fingerprint,
-    };
 
     if (
       !input.force &&
@@ -468,38 +619,11 @@ export class UsageScanner {
       cachedSummary.fingerprint === fingerprint &&
       cachedSummary.ratesKey === ratesKey
     ) {
-      stats.summaryHit = true;
-      stats.fileHits = allFiles.length;
-      const merged = {
-        ...cachedSummary.merged,
-        scanDurationMs: Date.now() - started,
-        readAt: new Date().toISOString(),
-      };
+      cachedSummary.computedAtMs = Date.now();
       this.log(
-        `usage cache hit ${input.sinceDay}..${input.untilDay} in ${merged.scanDurationMs}ms (${allFiles.length} files)`,
+        `usage cache hit ${input.sinceDay}..${input.untilDay} in ${Date.now() - started}ms (${allFiles.length} files)`,
       );
-      return {
-        summary: {
-          readAt: merged.readAt,
-          timeZone: merged.timeZone,
-          sinceDay: merged.sinceDay,
-          untilDay: merged.untilDay,
-          buckets: [],
-          sources: merged.sources,
-          pricing: merged.pricing,
-          scanDurationMs: merged.scanDurationMs,
-          sessions: merged.sessions,
-        },
-        merged: {
-          ...merged,
-          cache: {
-            ...EMPTY_CACHE_STATS,
-            summaryHit: true,
-            fileHits: stats.fileHits,
-          },
-        },
-        stats,
-      };
+      return this.hitSummary(cachedSummary, started, allFiles.length);
     }
 
     const [claude, codex, pi] = await Promise.all([
@@ -509,7 +633,6 @@ export class UsageScanner {
         input.sinceDay,
         input.untilDay,
         input.timeZone,
-        stats,
       ),
       this.recordsForFiles(
         "codex",
@@ -517,7 +640,6 @@ export class UsageScanner {
         input.sinceDay,
         input.untilDay,
         input.timeZone,
-        stats,
       ),
       this.recordsForFiles(
         "pi",
@@ -525,7 +647,6 @@ export class UsageScanner {
         input.sinceDay,
         input.untilDay,
         input.timeZone,
-        stats,
       ),
     ]);
 
@@ -541,12 +662,22 @@ export class UsageScanner {
     const livePaths = new Set(allFiles.map((file) => file.path));
     const retentionCutoffMs =
       Date.now() - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-    pruneScanCache(this.fileCache, {
+    const removed = pruneScanCache(this.fileCache, {
       livePaths,
       walkedRoots,
       windowStartMs: sinceMs,
       retentionCutoffMs,
     });
+    if (removed > 0) this.fileCacheDirty = true;
+
+    const fileHits =
+      claude.stats.fileHits + codex.stats.fileHits + pi.stats.fileHits;
+    const fileMisses =
+      claude.stats.fileMisses + codex.stats.fileMisses + pi.stats.fileMisses;
+    const filesParsed =
+      claude.stats.filesParsed +
+      codex.stats.filesParsed +
+      pi.stats.filesParsed;
 
     const allRecords = [...claude.records, ...codex.records, ...pi.records];
     const buckets = aggregateBuckets(allRecords, this.rates, input.timeZone);
@@ -578,9 +709,9 @@ export class UsageScanner {
       ...mergeSummary(summary),
       cache: {
         summaryHit: false,
-        fileHits: stats.fileHits,
-        fileMisses: stats.fileMisses,
-        filesParsed: stats.filesParsed,
+        fileHits,
+        fileMisses,
+        filesParsed,
       },
     };
 
@@ -588,16 +719,28 @@ export class UsageScanner {
       fingerprint,
       ratesKey,
       merged,
+      computedAtMs: Date.now(),
+      fileCount: allFiles.length,
     });
 
     await this.persistFileCache();
 
     this.log(
       `scanned usage ${input.sinceDay}..${input.untilDay} in ${summary.scanDurationMs}ms ` +
-        `(${stats.fileHits} cache hits, ${stats.filesParsed} parsed, ${summary.buckets.length} buckets)`,
+        `(${fileHits} cache hits, ${filesParsed} parsed, ${summary.buckets.length} buckets)`,
     );
 
-    return { summary, merged, stats };
+    return {
+      summary,
+      merged,
+      stats: {
+        fileHits,
+        fileMisses,
+        filesParsed,
+        summaryHit: false,
+        fingerprint,
+      },
+    };
   }
 }
 
