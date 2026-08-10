@@ -1,0 +1,11 @@
+.usage-page {
+  --usage-claude: #d97757;
+  --usage-codex: #525252;
+  --usage-pi: #059669;
+}
+
+.dark .usage-page,
+:root.dark .usage-page {
+  --usage-codex: #e6e6e6;
+  --usage-pi: #6ee7b7;
+}
