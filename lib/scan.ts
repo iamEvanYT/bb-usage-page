@@ -3,7 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
-import { dayInTimeZone } from "./format";
+import { dayInTimeZone, makeWindow } from "./format";
 import {
   cacheSavingsUsd,
   isIgnoredUsageModel,
@@ -13,10 +13,19 @@ import {
   type RateTable,
 } from "./pricing";
 import {
+  BASE_CACHE_FILE,
+  RATES_CACHE_FILE,
+  SCAN_CACHE_FILE,
+  usageDataPath,
+} from "./plugin-data";
+import {
+  decodeBaseCache,
   decodeScanCache,
+  encodeBaseCache,
   encodeScanCache,
   fingerprintFiles,
   pruneScanCache,
+  type PersistedBaseScan,
   type ScanCache,
 } from "./scan-cache";
 import {
@@ -42,13 +51,13 @@ import {
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
 const MTIME_SLACK_MS = 36 * 60 * 60 * 1000;
 const CACHE_RETENTION_DAYS = 90;
-/** Bump when aggregation filters change so in-memory summaries rebuild. */
-const SUMMARY_CACHE_VERSION = 3;
 /**
- * Serve a warm summary without walking the filesystem. Fresh agent turns can
+ * Serve a warm base scan without walking the filesystem. Fresh agent turns can
  * lag up to this window until the next walk; manual refresh passes force.
  */
-const SUMMARY_HOT_TTL_MS = 10_000;
+const BASE_HOT_TTL_MS = 15_000;
+/** Always scan this far back so 7/30/90 switches are pure in-memory slices. */
+const BASE_WINDOW_DAYS = 90;
 
 const EMPTY_CACHE_STATS = {
   summaryHit: false,
@@ -121,10 +130,11 @@ async function listTranscriptFiles(
     } catch {
       return;
     }
+    const subdirs: string[] = [];
     for (const entry of entries) {
       const child = NodePath.join(dir, entry.name);
       if (entry.isDirectory()) {
-        await walk(child);
+        subdirs.push(child);
         continue;
       }
       if (!entry.name.endsWith(".jsonl")) continue;
@@ -136,6 +146,9 @@ async function listTranscriptFiles(
       } catch {
         // vanished
       }
+    }
+    if (subdirs.length > 0) {
+      await Promise.all(subdirs.map((subdir) => walk(subdir)));
     }
   };
   await walk(root);
@@ -233,81 +246,119 @@ async function resolvePiDirs(): Promise<string[]> {
   return existing;
 }
 
-interface SummaryCacheEntry {
-  fingerprint: string;
-  ratesKey: string;
-  merged: MergedUsage;
-  computedAtMs: number;
-  fileCount: number;
-}
+type BaseScan = PersistedBaseScan;
 
 export class UsageScanner {
   private fileCache: ScanCache = new Map();
-  private fileCacheLoaded = false;
+  private cachesLoaded = false;
   private fileCacheDirty = false;
+  private baseCacheDirty = false;
   private rates: RateTable = new Map();
   private ratesFetchedAtMs: number | null = null;
+  private ratesContentKey = "0:0";
   private ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
   private readonly ratesCachePath: string;
   private readonly scanCachePath: string;
-  private readonly summaryCache = new Map<string, SummaryCacheEntry>();
+  private readonly baseCachePath: string;
+  private baseScan: BaseScan | null = null;
   private loadPromise: Promise<void> | null = null;
+  /** Serialize reads so force/clear cannot race an in-flight walk. */
+  private readChain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly deps: UsageScanDeps) {
-    this.ratesCachePath = NodePath.join(deps.dataDir, "usage-model-rates.json");
-    this.scanCachePath = NodePath.join(deps.dataDir, "usage-scan-cache.json");
+    this.ratesCachePath = usageDataPath(RATES_CACHE_FILE, deps.dataDir);
+    this.scanCachePath = usageDataPath(SCAN_CACHE_FILE, deps.dataDir);
+    this.baseCachePath = usageDataPath(BASE_CACHE_FILE, deps.dataDir);
   }
 
   private log(message: string): void {
     this.deps.log?.(message);
   }
 
-  private async ensureFileCacheLoaded(): Promise<void> {
-    if (this.fileCacheLoaded) return;
+  private async ensureCachesLoaded(): Promise<void> {
+    if (this.cachesLoaded) return;
     if (this.loadPromise) {
       await this.loadPromise;
       return;
     }
     this.loadPromise = (async () => {
-      try {
-        const raw = await NodeFSP.readFile(this.scanCachePath, "utf8");
-        this.fileCache = decodeScanCache(JSON.parse(raw));
-        this.log(`loaded scan cache (${this.fileCache.size} files)`);
-      } catch {
+      const [scanRaw, baseRaw] = await Promise.all([
+        NodeFSP.readFile(this.scanCachePath, "utf8").catch(() => null),
+        NodeFSP.readFile(this.baseCachePath, "utf8").catch(() => null),
+      ]);
+      if (scanRaw) {
+        try {
+          this.fileCache = decodeScanCache(JSON.parse(scanRaw));
+          this.log(`loaded scan cache (${this.fileCache.size} files)`);
+        } catch {
+          this.fileCache = new Map();
+        }
+      } else {
         this.fileCache = new Map();
-      } finally {
-        this.fileCacheLoaded = true;
-        this.loadPromise = null;
       }
+      if (baseRaw) {
+        try {
+          this.baseScan = decodeBaseCache(JSON.parse(baseRaw));
+          if (this.baseScan) {
+            this.log(
+              `loaded base cache ${this.baseScan.sinceDay}..${this.baseScan.untilDay}`,
+            );
+          }
+        } catch {
+          this.baseScan = null;
+        }
+      }
+      this.cachesLoaded = true;
+      this.loadPromise = null;
     })();
     await this.loadPromise;
   }
 
-  private async persistFileCache(): Promise<void> {
-    if (!this.fileCacheDirty) return;
-    await NodeFSP.mkdir(NodePath.dirname(this.scanCachePath), {
-      recursive: true,
-    });
-    const encoded = encodeScanCache(this.fileCache);
-    await NodeFSP.writeFile(this.scanCachePath, JSON.stringify(encoded));
-    this.fileCacheDirty = false;
-    this.log(`persisted scan cache (${this.fileCache.size} files)`);
+  private async persistCaches(): Promise<void> {
+    if (!this.fileCacheDirty && !this.baseCacheDirty) return;
+    await NodeFSP.mkdir(this.deps.dataDir, { recursive: true });
+    const writes: Promise<void>[] = [];
+    if (this.fileCacheDirty) {
+      writes.push(
+        NodeFSP.writeFile(
+          this.scanCachePath,
+          JSON.stringify(encodeScanCache(this.fileCache)),
+        ).then(() => {
+          this.fileCacheDirty = false;
+          this.log(`persisted scan cache (${this.fileCache.size} files)`);
+        }),
+      );
+    }
+    if (this.baseCacheDirty && this.baseScan) {
+      writes.push(
+        NodeFSP.writeFile(
+          this.baseCachePath,
+          JSON.stringify(encodeBaseCache(this.baseScan)),
+        ).then(() => {
+          this.baseCacheDirty = false;
+          this.log(
+            `persisted base cache ${this.baseScan!.sinceDay}..${this.baseScan!.untilDay}`,
+          );
+        }),
+      );
+    }
+    await Promise.all(writes);
   }
 
   async flush(): Promise<void> {
-    await this.persistFileCache();
+    await this.persistCaches();
   }
 
-  private async clearFileCache(): Promise<void> {
+  private async clearDurableCaches(): Promise<void> {
     this.fileCache = new Map();
     this.fileCacheDirty = false;
-    this.summaryCache.clear();
-    try {
-      await NodeFSP.unlink(this.scanCachePath);
-    } catch {
-      // absent
-    }
-    this.log("cleared durable scan cache");
+    this.baseScan = null;
+    this.baseCacheDirty = false;
+    await Promise.all([
+      NodeFSP.unlink(this.scanCachePath).catch(() => undefined),
+      NodeFSP.unlink(this.baseCachePath).catch(() => undefined),
+    ]);
+    this.log("cleared durable scan + base caches");
   }
 
   private async ensureRates(): Promise<void> {
@@ -334,6 +385,7 @@ export class UsageScanner {
           if (parsed.size > 0) {
             this.rates = parsed;
             this.ratesFetchedAtMs = cached.fetchedAtMs;
+            this.ratesContentKey = rateTableKey(parsed);
             this.ratesStatus = "cached";
             if (now - cached.fetchedAtMs < RATES_TTL_MS) return;
           }
@@ -343,6 +395,7 @@ export class UsageScanner {
       }
     }
 
+    const previousKey = this.ratesKey();
     try {
       const response = await fetch(LITELLM_RATES_URL, {
         signal: AbortSignal.timeout(10_000),
@@ -353,6 +406,7 @@ export class UsageScanner {
       if (parsed.size === 0) return;
       this.rates = parsed;
       this.ratesFetchedAtMs = now;
+      this.ratesContentKey = rateTableKey(parsed);
       this.ratesStatus = "fresh";
       await NodeFSP.mkdir(NodePath.dirname(this.ratesCachePath), {
         recursive: true,
@@ -361,24 +415,21 @@ export class UsageScanner {
         this.ratesCachePath,
         JSON.stringify({ fetchedAtMs: now, document }),
       );
-      // Rate changes invalidate priced summaries.
-      this.summaryCache.clear();
+      // Only drop the priced base when priced model rates actually change.
+      if (this.ratesKey() !== previousKey) {
+        this.baseScan = null;
+        this.baseCacheDirty = true;
+      }
     } catch {
       if (this.rates.size > 0) {
         this.ratesStatus = "cached";
-        // TTL elapsed but refresh failed — do not keep serving priced summaries
-        // as if rates were still fresh.
-        this.summaryCache.clear();
       }
     }
   }
 
+  /** Content identity for the loaded rate table (not fetch freshness). */
   private ratesKey(): string {
-    return `${this.ratesFetchedAtMs ?? 0}:${this.rates.size}:${this.ratesStatus}`;
-  }
-
-  private summaryKey(input: ReadSummaryOptions): string {
-    return `${SUMMARY_CACHE_VERSION}|${input.sinceDay}|${input.untilDay}|${input.timeZone}`;
+    return this.ratesContentKey;
   }
 
   private async collectFiles(
@@ -390,10 +441,11 @@ export class UsageScanner {
   ): Promise<{ files: TranscriptFile[]; roots: string[] }> {
     if (roots.length === 0) return { files: [], roots: [] };
     const byPath = new Map<string, TranscriptFile>();
-    for (const root of roots) {
-      for (const file of await listTranscriptFiles(root, sinceMs)) {
-        byPath.set(file.path, file);
-      }
+    const listed = await Promise.all(
+      roots.map((root) => listTranscriptFiles(root, sinceMs)),
+    );
+    for (const files of listed) {
+      for (const file of files) byPath.set(file.path, file);
     }
 
     // Restored/copied transcripts can have stale mtimes. If we already parsed
@@ -497,44 +549,84 @@ export class UsageScanner {
     };
   }
 
-  private hitSummary(
-    cached: SummaryCacheEntry,
+  private coveringWindow(input: ReadSummaryOptions): {
+    sinceDay: string;
+    untilDay: string;
+    timeZone: string;
+  } {
+    const ninety = makeWindow(BASE_WINDOW_DAYS, new Date(), input.timeZone);
+    return {
+      sinceDay:
+        input.sinceDay < ninety.sinceDay ? input.sinceDay : ninety.sinceDay,
+      untilDay:
+        input.untilDay > ninety.untilDay ? input.untilDay : ninety.untilDay,
+      timeZone: input.timeZone,
+    };
+  }
+
+  private baseCovers(
+    base: BaseScan,
+    input: ReadSummaryOptions,
+    ratesKey: string,
+  ): boolean {
+    return (
+      base.timeZone === input.timeZone &&
+      base.ratesKey === ratesKey &&
+      base.sinceDay <= input.sinceDay &&
+      base.untilDay >= input.untilDay
+    );
+  }
+
+  private sliceFromBase(
+    base: BaseScan,
+    input: ReadSummaryOptions,
     started: number,
-    fileHits: number,
+    summaryHit: boolean,
   ): {
     summary: UsageSummary;
     merged: MergedUsage;
     stats: ScanStats;
   } {
-    const merged = {
-      ...cached.merged,
-      scanDurationMs: Date.now() - started,
+    const buckets = base.buckets.filter(
+      (bucket) => bucket.day >= input.sinceDay && bucket.day <= input.untilDay,
+    );
+    const sessionIds = new Set<string>();
+    for (const [day, ids] of base.sessionsByDay) {
+      if (day < input.sinceDay || day > input.untilDay) continue;
+      for (const id of ids) sessionIds.add(id);
+    }
+
+    const summary: UsageSummary = {
       readAt: new Date().toISOString(),
+      timeZone: input.timeZone,
+      sinceDay: input.sinceDay,
+      untilDay: input.untilDay,
+      buckets,
+      sources: base.sources,
+      pricing: base.pricing,
+      scanDurationMs: Date.now() - started,
+      sessions: sessionIds.size,
+    };
+
+    const merged: MergedUsage = {
+      ...mergeSummary(summary),
       cache: {
-        ...EMPTY_CACHE_STATS,
-        summaryHit: true,
-        fileHits,
+        summaryHit,
+        fileHits: summaryHit ? base.fileCount : base.fileHits,
+        fileMisses: summaryHit ? 0 : base.fileMisses,
+        filesParsed: summaryHit ? 0 : base.filesParsed,
       },
     };
+
     return {
-      summary: {
-        readAt: merged.readAt,
-        timeZone: merged.timeZone,
-        sinceDay: merged.sinceDay,
-        untilDay: merged.untilDay,
-        buckets: [],
-        sources: merged.sources,
-        pricing: merged.pricing,
-        scanDurationMs: merged.scanDurationMs,
-        sessions: merged.sessions,
-      },
+      summary,
       merged,
       stats: {
-        fileHits,
-        fileMisses: 0,
-        filesParsed: 0,
-        summaryHit: true,
-        fingerprint: cached.fingerprint,
+        fileHits: merged.cache.fileHits,
+        fileMisses: merged.cache.fileMisses,
+        filesParsed: merged.cache.filesParsed,
+        summaryHit,
+        fingerprint: base.fingerprint,
       },
     };
   }
@@ -544,38 +636,50 @@ export class UsageScanner {
     merged: MergedUsage;
     stats: ScanStats;
   }> {
+    const run = this.readChain.then(() => this.readSummaryUnlocked(input));
+    this.readChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async readSummaryUnlocked(input: ReadSummaryOptions): Promise<{
+    summary: UsageSummary;
+    merged: MergedUsage;
+    stats: ScanStats;
+  }> {
     const started = Date.now();
-    await this.ensureFileCacheLoaded();
+    await this.ensureCachesLoaded();
 
     if (input.force) {
-      await this.clearFileCache();
-      this.fileCacheLoaded = true;
+      await this.clearDurableCaches();
+      this.cachesLoaded = true;
     }
 
     await this.ensureRates();
 
-    const summaryKey = this.summaryKey(input);
     const ratesKey = this.ratesKey();
-    const cachedSummary = this.summaryCache.get(summaryKey);
+    const cover = this.coveringWindow(input);
+    const base = this.baseScan;
+    const stale = !base || Date.now() - base.computedAtMs >= BASE_HOT_TTL_MS;
 
-    // Hot path: no filesystem walk when the same window was just computed.
+    // Hot path: pure in-memory slice only while the base is fresh. After the
+    // hot TTL, even 7/30 narrows must walk + fingerprint so new transcripts
+    // are not stuck until a 90-day request or manual refresh.
     if (
       !input.force &&
-      cachedSummary &&
-      cachedSummary.ratesKey === ratesKey &&
-      Date.now() - cachedSummary.computedAtMs < SUMMARY_HOT_TTL_MS
+      base &&
+      this.baseCovers(base, input, ratesKey) &&
+      !stale
     ) {
       this.log(
-        `usage hot cache ${input.sinceDay}..${input.untilDay} in ${Date.now() - started}ms`,
+        `usage slice ${input.sinceDay}..${input.untilDay} from base ${base.sinceDay}..${base.untilDay} in ${Date.now() - started}ms`,
       );
-      return this.hitSummary(
-        cachedSummary,
-        started,
-        cachedSummary.fileCount,
-      );
+      return this.sliceFromBase(base, input, started, true);
     }
 
-    const sinceMs = windowStartMs(input.sinceDay);
+    const sinceMs = windowStartMs(cover.sinceDay);
     const [claudeDirs, codexDirs, piDirs] = await Promise.all([
       resolveClaudeDirs(),
       resolveCodexDirs(),
@@ -586,23 +690,23 @@ export class UsageScanner {
       this.collectFiles(
         claudeDirs,
         sinceMs,
-        input.sinceDay,
-        input.untilDay,
-        input.timeZone,
+        cover.sinceDay,
+        cover.untilDay,
+        cover.timeZone,
       ),
       this.collectFiles(
         codexDirs,
         sinceMs,
-        input.sinceDay,
-        input.untilDay,
-        input.timeZone,
+        cover.sinceDay,
+        cover.untilDay,
+        cover.timeZone,
       ),
       this.collectFiles(
         piDirs,
         sinceMs,
-        input.sinceDay,
-        input.untilDay,
-        input.timeZone,
+        cover.sinceDay,
+        cover.untilDay,
+        cover.timeZone,
       ),
     ]);
 
@@ -613,40 +717,41 @@ export class UsageScanner {
     ];
     const fingerprint = fingerprintFiles(allFiles);
 
+    // Disk/memory base still valid — touch TTL, skip parse + re-aggregate.
     if (
       !input.force &&
-      cachedSummary &&
-      cachedSummary.fingerprint === fingerprint &&
-      cachedSummary.ratesKey === ratesKey
+      base &&
+      this.baseCovers(base, input, ratesKey) &&
+      base.fingerprint === fingerprint
     ) {
-      cachedSummary.computedAtMs = Date.now();
+      base.computedAtMs = Date.now();
       this.log(
-        `usage cache hit ${input.sinceDay}..${input.untilDay} in ${Date.now() - started}ms (${allFiles.length} files)`,
+        `usage base fingerprint hit; slice ${input.sinceDay}..${input.untilDay} in ${Date.now() - started}ms (${allFiles.length} files)`,
       );
-      return this.hitSummary(cachedSummary, started, allFiles.length);
+      return this.sliceFromBase(base, input, started, true);
     }
 
     const [claude, codex, pi] = await Promise.all([
       this.recordsForFiles(
         "claude",
         claudeFiles.files,
-        input.sinceDay,
-        input.untilDay,
-        input.timeZone,
+        cover.sinceDay,
+        cover.untilDay,
+        cover.timeZone,
       ),
       this.recordsForFiles(
         "codex",
         codexFiles.files,
-        input.sinceDay,
-        input.untilDay,
-        input.timeZone,
+        cover.sinceDay,
+        cover.untilDay,
+        cover.timeZone,
       ),
       this.recordsForFiles(
         "pi",
         piFiles.files,
-        input.sinceDay,
-        input.untilDay,
-        input.timeZone,
+        cover.sinceDay,
+        cover.untilDay,
+        cover.timeZone,
       ),
     ]);
 
@@ -680,75 +785,77 @@ export class UsageScanner {
       pi.stats.filesParsed;
 
     const allRecords = [...claude.records, ...codex.records, ...pi.records];
-    const buckets = aggregateBuckets(allRecords, this.rates, input.timeZone);
-    const sessions = new Set(
-      allRecords.map((record) => record.sessionId).filter(Boolean),
+    const { buckets, sessionsByDay } = aggregateBuckets(
+      allRecords,
+      this.rates,
+      cover.timeZone,
     );
 
-    const summary: UsageSummary = {
-      readAt: new Date().toISOString(),
-      timeZone: input.timeZone,
-      sinceDay: input.sinceDay,
-      untilDay: input.untilDay,
-      buckets,
-      sources: [claude.source, codex.source, pi.source],
-      pricing: {
-        status: this.ratesStatus,
-        source: LITELLM_RATES_URL,
-        fetchedAt:
-          this.ratesFetchedAtMs === null
-            ? null
-            : new Date(this.ratesFetchedAtMs).toISOString(),
-        knownModels: this.rates.size,
-      },
-      scanDurationMs: Date.now() - started,
-      sessions: sessions.size,
+    const pricing: UsageSummary["pricing"] = {
+      status: this.ratesStatus,
+      source: LITELLM_RATES_URL,
+      fetchedAt:
+        this.ratesFetchedAtMs === null
+          ? null
+          : new Date(this.ratesFetchedAtMs).toISOString(),
+      knownModels: this.rates.size,
     };
 
-    const merged: MergedUsage = {
-      ...mergeSummary(summary),
-      cache: {
-        summaryHit: false,
-        fileHits,
-        fileMisses,
-        filesParsed,
-      },
-    };
-
-    this.summaryCache.set(summaryKey, {
+    this.baseScan = {
+      sinceDay: cover.sinceDay,
+      untilDay: cover.untilDay,
+      timeZone: cover.timeZone,
       fingerprint,
       ratesKey,
-      merged,
       computedAtMs: Date.now(),
+      buckets,
+      sources: [claude.source, codex.source, pi.source],
+      pricing,
+      sessionsByDay,
       fileCount: allFiles.length,
-    });
+      fileHits,
+      fileMisses,
+      filesParsed,
+    };
+    this.baseCacheDirty = true;
 
-    await this.persistFileCache();
+    await this.persistCaches();
 
+    const sliced = this.sliceFromBase(this.baseScan, input, started, false);
     this.log(
-      `scanned usage ${input.sinceDay}..${input.untilDay} in ${summary.scanDurationMs}ms ` +
-        `(${fileHits} cache hits, ${filesParsed} parsed, ${summary.buckets.length} buckets)`,
+      `scanned usage base ${cover.sinceDay}..${cover.untilDay}; served ${input.sinceDay}..${input.untilDay} in ${sliced.summary.scanDurationMs}ms ` +
+        `(${fileHits} cache hits, ${filesParsed} parsed, ${this.baseScan.buckets.length} buckets)`,
     );
 
-    return {
-      summary,
-      merged,
-      stats: {
-        fileHits,
-        fileMisses,
-        filesParsed,
-        summaryHit: false,
-        fingerprint,
-      },
-    };
+    return sliced;
   }
+}
+
+/** Stable key over priced model rates — ignores fetch timestamps. */
+function rateTableKey(rates: RateTable): string {
+  const parts = [...rates.entries()]
+    .map(
+      ([model, rate]) =>
+        `${model}:${rate.inputCostPerToken}:${rate.outputCostPerToken}:${rate.cacheReadCostPerToken}:${rate.cacheCreationCostPerToken}`,
+    )
+    .sort();
+  let hash = 2166136261;
+  for (const part of parts) {
+    for (let i = 0; i < part.length; i += 1) {
+      hash ^= part.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    hash ^= 10;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${parts.length.toString(16)}:${(hash >>> 0).toString(16)}`;
 }
 
 function aggregateBuckets(
   records: readonly UsageRecord[],
   rates: RateTable,
   timeZone: string,
-): UsageBucket[] {
+): { buckets: UsageBucket[]; sessionsByDay: Map<string, Set<string>> } {
   const map = new Map<
     string,
     {
@@ -756,9 +863,18 @@ function aggregateBuckets(
       sessionIds: Set<string>;
     }
   >();
+  const sessionsByDay = new Map<string, Set<string>>();
 
   for (const record of records) {
     const day = dayInTimeZone(record.timestampMs, timeZone);
+    if (record.sessionId) {
+      let daySessions = sessionsByDay.get(day);
+      if (!daySessions) {
+        daySessions = new Set();
+        sessionsByDay.set(day, daySessions);
+      }
+      daySessions.add(record.sessionId);
+    }
     const key = `${day}\0${record.provider}\0${record.model}`;
     let entry = map.get(key);
     if (!entry) {
@@ -807,7 +923,7 @@ function aggregateBuckets(
     }
   }
 
-  return [...map.values()]
+  const buckets = [...map.values()]
     .map(({ bucket, sessionIds }) => ({
       ...bucket,
       sessions: sessionIds.size,
@@ -818,6 +934,7 @@ function aggregateBuckets(
         a.provider.localeCompare(b.provider) ||
         a.model.localeCompare(b.model),
     );
+  return { buckets, sessionsByDay };
 }
 
 export function mergeSummary(summary: UsageSummary): MergedUsage {

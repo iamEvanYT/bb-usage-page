@@ -1,10 +1,19 @@
-import type { UsageProviderKind, UsageRecord } from "./types";
+import type {
+  UsageBucket,
+  UsageProviderKind,
+  UsageRecord,
+  UsageSource,
+  UsageSummary,
+} from "./types";
 
 /**
  * Bump when parse / filter semantics change so durable entries are discarded.
  * v2: ignore `<synthetic>`; Codex fork suppression is subagent-only.
  */
 export const USAGE_SCAN_CACHE_VERSION = 2 as const;
+
+/** Bump when aggregated base shape or pricing inputs change. */
+export const USAGE_BASE_CACHE_VERSION = 1 as const;
 
 export interface CachedFile {
   size: number;
@@ -173,6 +182,10 @@ export function decodeScanCache(document: unknown): ScanCache {
   return cache;
 }
 
+function pathUnderRoot(path: string, root: string): boolean {
+  return path === root || path.startsWith(`${root}/`);
+}
+
 export function pruneScanCache(
   cache: ScanCache,
   options: {
@@ -186,7 +199,7 @@ export function pruneScanCache(
   for (const [path, entry] of cache) {
     const agedOut = entry.mtimeMs < options.retentionCutoffMs;
     const underWalkedRoot = options.walkedRoots.some((root) =>
-      path.startsWith(root),
+      pathUnderRoot(path, root),
     );
     const deleted =
       underWalkedRoot &&
@@ -217,4 +230,112 @@ export function fingerprintFiles(
     hash = Math.imul(hash, 16777619);
   }
   return `${parts.length.toString(16)}:${(hash >>> 0).toString(16)}`;
+}
+
+export interface PersistedBaseScan {
+  sinceDay: string;
+  untilDay: string;
+  timeZone: string;
+  fingerprint: string;
+  ratesKey: string;
+  computedAtMs: number;
+  buckets: UsageBucket[];
+  sources: UsageSource[];
+  pricing: UsageSummary["pricing"];
+  sessionsByDay: Map<string, Set<string>>;
+  fileCount: number;
+  fileHits: number;
+  fileMisses: number;
+  filesParsed: number;
+}
+
+interface SerializedBaseCache {
+  version: number;
+  sinceDay: string;
+  untilDay: string;
+  timeZone: string;
+  fingerprint: string;
+  ratesKey: string;
+  computedAtMs: number;
+  buckets: UsageBucket[];
+  sources: UsageSource[];
+  pricing: UsageSummary["pricing"];
+  sessionsByDay: Record<string, string[]>;
+  fileCount: number;
+  fileHits: number;
+  fileMisses: number;
+  filesParsed: number;
+}
+
+export function encodeBaseCache(base: PersistedBaseScan): SerializedBaseCache {
+  const sessionsByDay: Record<string, string[]> = {};
+  for (const [day, ids] of base.sessionsByDay) {
+    sessionsByDay[day] = [...ids];
+  }
+  return {
+    version: USAGE_BASE_CACHE_VERSION,
+    sinceDay: base.sinceDay,
+    untilDay: base.untilDay,
+    timeZone: base.timeZone,
+    fingerprint: base.fingerprint,
+    ratesKey: base.ratesKey,
+    computedAtMs: base.computedAtMs,
+    buckets: base.buckets,
+    sources: base.sources,
+    pricing: base.pricing,
+    sessionsByDay,
+    fileCount: base.fileCount,
+    fileHits: base.fileHits,
+    fileMisses: base.fileMisses,
+    filesParsed: base.filesParsed,
+  };
+}
+
+export function decodeBaseCache(document: unknown): PersistedBaseScan | null {
+  if (typeof document !== "object" || document === null) return null;
+  const root = document as Partial<SerializedBaseCache>;
+  if (root.version !== USAGE_BASE_CACHE_VERSION) return null;
+  if (
+    typeof root.sinceDay !== "string" ||
+    typeof root.untilDay !== "string" ||
+    typeof root.timeZone !== "string" ||
+    typeof root.fingerprint !== "string" ||
+    typeof root.ratesKey !== "string" ||
+    typeof root.computedAtMs !== "number" ||
+    !Array.isArray(root.buckets) ||
+    !Array.isArray(root.sources) ||
+    typeof root.pricing !== "object" ||
+    root.pricing === null ||
+    typeof root.sessionsByDay !== "object" ||
+    root.sessionsByDay === null ||
+    typeof root.fileCount !== "number"
+  ) {
+    return null;
+  }
+
+  const sessionsByDay = new Map<string, Set<string>>();
+  for (const [day, ids] of Object.entries(root.sessionsByDay)) {
+    if (!Array.isArray(ids)) continue;
+    sessionsByDay.set(
+      day,
+      new Set(ids.filter((id): id is string => typeof id === "string")),
+    );
+  }
+
+  return {
+    sinceDay: root.sinceDay,
+    untilDay: root.untilDay,
+    timeZone: root.timeZone,
+    fingerprint: root.fingerprint,
+    ratesKey: root.ratesKey,
+    computedAtMs: root.computedAtMs,
+    buckets: root.buckets,
+    sources: root.sources,
+    pricing: root.pricing,
+    sessionsByDay,
+    fileCount: root.fileCount,
+    fileHits: typeof root.fileHits === "number" ? root.fileHits : 0,
+    fileMisses: typeof root.fileMisses === "number" ? root.fileMisses : 0,
+    filesParsed: typeof root.filesParsed === "number" ? root.filesParsed : 0,
+  };
 }

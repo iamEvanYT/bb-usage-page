@@ -1,5 +1,3 @@
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
 
@@ -8,6 +6,7 @@ import {
   isValidTimeZone,
   makeWindow,
 } from "./lib/format";
+import { USAGE_DATA_DIR } from "./lib/plugin-data";
 import { mergedUsageSchema } from "./lib/rpc-schema";
 import { UsageScanner } from "./lib/scan";
 
@@ -45,9 +44,8 @@ function parseDays(argv: readonly string[]): 7 | 30 | 90 {
 }
 
 export default async function plugin(bb: BbPluginApi) {
-  const dataDir = NodePath.join(NodeOS.homedir(), ".bb", "plugins", "usage");
   const scanner = new UsageScanner({
-    dataDir,
+    dataDir: USAGE_DATA_DIR,
     log: (message) => bb.log.info(message),
   });
 

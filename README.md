@@ -8,7 +8,8 @@ page.
 
 - Sidebar **Usage** panel with 7 / 30 / 90 day windows
 - Provider split (Codex, Claude Code, Pi), daily chart, model/day breakdown
-- Durable scan cache — refresh reuses parsed transcripts unless files changed
+- Durable on-disk caches — only re-parse transcripts whose size/mtime changed
+- 7 / 30 / 90 day switches slice a warm 90-day base (no re-scan)
 - CLI: `bb usage show [--days 7|30|90] [--force]`
 
 ## Data sources
@@ -19,7 +20,17 @@ page.
 | Claude Code  | `~/.claude/projects/**/*.jsonl` (and `CLAUDE_CONFIG_DIR`) | Transcript `costUSD` or rates |
 | Pi           | `~/.bb/pi-bridge-sessions`, `~/.pi/agent/sessions`       | `message.usage.cost.total`   |
 
-Cache files live under `~/.bb/plugins/usage/`.
+## On-disk cache
+
+All durable state lives under `~/.bb/plugins/usage/`:
+
+| File | Purpose |
+| ---- | ------- |
+| `usage-scan-cache.json` | Per-transcript parse cache (records keyed by path + size + mtime) |
+| `usage-base-cache.json` | Aggregated 90-day buckets/sessions for instant window slices |
+| `usage-model-rates.json` | Cached LiteLLM pricing table |
+
+Refresh / `--force` deletes the scan + base caches and re-reads transcripts.
 
 ## Install
 
@@ -57,5 +68,5 @@ npm run build          # refresh dist/ before publishing
 
 - Costs are **raw API-equivalent** estimates, not subscription invoices.
 - `<synthetic>` Claude transcript rows are ignored (local/non-billed).
-- Refresh / `--force` clears the durable parse cache and re-reads transcripts.
-- Warm requests within ~10s reuse the last summary without walking the filesystem.
+- After the first scan, unchanged loads are fingerprint hits (no re-parse / no re-aggregate).
+- In-memory window slices stay instant; a short hot TTL avoids filesystem walks on day toggles.

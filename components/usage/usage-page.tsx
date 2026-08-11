@@ -41,10 +41,18 @@ export function UsagePage() {
   const forceRefreshRef = useRef(false);
 
   const window = useMemo(() => makeWindow(windowDays), [windowDays]);
+  const dataMatchesWindow =
+    merged !== null &&
+    merged.sinceDay === window.sinceDay &&
+    merged.untilDay === window.untilDay &&
+    merged.timeZone === window.timeZone;
 
   useEffect(() => {
     let cancelled = false;
+    let settled = false;
     const force = forceRefreshRef.current;
+    // Consume force for this request; if cleanup cancels before settle, put
+    // it back so Strict Mode / rapid toggles still hard-refresh once.
     forceRefreshRef.current = false;
     if (hasLoadedRef.current) setRefreshing(true);
     else setLoading(true);
@@ -57,6 +65,7 @@ export function UsagePage() {
         force,
       })
       .then((result) => {
+        settled = true;
         if (!cancelled) {
           hasLoadedRef.current = true;
           setMerged(result);
@@ -65,6 +74,7 @@ export function UsagePage() {
         }
       })
       .catch((err: unknown) => {
+        settled = true;
         if (!cancelled) {
           setError(err instanceof Error ? err.message : String(err));
           setLoading(false);
@@ -73,6 +83,7 @@ export function UsagePage() {
       });
     return () => {
       cancelled = true;
+      if (force && !settled) forceRefreshRef.current = true;
     };
   }, [rpc, reloadKey, window.sinceDay, window.timeZone, window.untilDay, windowDays]);
 
@@ -147,13 +158,13 @@ export function UsagePage() {
           </div>
         </div>
 
-        {loading ? (
+        {loading || (!dataMatchesWindow && !error) ? (
           <UsageSkeleton />
         ) : error ? (
           <div className="rounded-md border border-destructive/40 px-4 py-3 text-sm text-destructive">
             Failed to load usage: {error}
           </div>
-        ) : merged ? (
+        ) : merged && dataMatchesWindow ? (
           <>
             <section className="grid gap-6 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
               <div className="flex flex-col gap-5">

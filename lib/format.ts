@@ -75,18 +75,51 @@ export function enumerateDays(
   return days;
 }
 
+const validatedTimeZones = new Map<string, boolean>();
+
 export function isValidTimeZone(timeZone: string): boolean {
+  const cached = validatedTimeZones.get(timeZone);
+  if (cached !== undefined) return cached;
   try {
     Intl.DateTimeFormat("en-US", { timeZone }).format(new Date());
+    validatedTimeZones.set(timeZone, true);
     return true;
   } catch {
+    validatedTimeZones.set(timeZone, false);
     return false;
   }
 }
 
+let defaultTimeZone: string | null = null;
+
 export function resolveTimeZone(timeZone: string | undefined): string {
   if (timeZone && isValidTimeZone(timeZone)) return timeZone;
-  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  if (!defaultTimeZone) {
+    defaultTimeZone =
+      Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  }
+  return defaultTimeZone;
+}
+
+const dayFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** Reused per timezone — constructing Intl.DateTimeFormat per call is very slow. */
+export function dayFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = dayFormatters.get(timeZone);
+  if (formatter) return formatter;
+  const zone = resolveTimeZone(timeZone);
+  formatter = dayFormatters.get(zone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    dayFormatters.set(zone, formatter);
+  }
+  if (timeZone !== zone) dayFormatters.set(timeZone, formatter);
+  return formatter;
 }
 
 /** Civil-date window in `timeZone` (inclusive). */
@@ -96,13 +129,7 @@ export function makeWindow(
   timeZone = resolveTimeZone(undefined),
 ): { sinceDay: string; untilDay: string; timeZone: string } {
   const zone = resolveTimeZone(timeZone);
-  const format = new Intl.DateTimeFormat("en-CA", {
-    timeZone: zone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const untilDay = format.format(now);
+  const untilDay = dayFormatter(zone).format(now);
   const [year = 0, month = 1, dayOfMonth = 1] = untilDay
     .split("-")
     .map((part) => Number.parseInt(part, 10));
@@ -117,13 +144,7 @@ export function makeWindow(
 }
 
 export function dayInTimeZone(timestampMs: number, timeZone: string): string {
-  const zone = resolveTimeZone(timeZone);
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: zone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(timestampMs));
+  return dayFormatter(timeZone).format(new Date(timestampMs));
 }
 
 export function assertValidWindow(input: {
