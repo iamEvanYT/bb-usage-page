@@ -4,6 +4,14 @@
   "description": "Usage dashboard for Claude Code, Codex, and Pi sessions in bb.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iamEvanYT/bb-usage-page.git"
+  },
+  "bugs": {
+    "url": "https://github.com/iamEvanYT/bb-usage-page/issues"
+  },
+  "homepage": "https://github.com/iamEvanYT/bb-usage-page#readme",
   "engines": {
     "bb": ">=0.36",
     "bbPluginSdk": "^0.4.1"
