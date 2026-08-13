@@ -13,8 +13,10 @@ import type {
  * v2: ignore `<synthetic>`; Codex fork suppression is subagent-only.
  * v3: suppress copied history for any `forked_from_id` (not just subagent spawn).
  * v4: include ctime in file identity to reject same-size rewrites with mtime restored.
+ * v5: Codex adjacent-only signature dedupe; Claude structured dedupe keys;
+ *     reject malformed Codex cache splits.
  */
-export const USAGE_SCAN_CACHE_VERSION = 4 as const;
+export const USAGE_SCAN_CACHE_VERSION = 5 as const;
 
 /** v4: buckets are now homogeneous by pricing source for accurate cost quality. */
 export const USAGE_BASE_CACHE_VERSION = 4 as const;
