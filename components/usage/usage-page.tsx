@@ -37,10 +37,11 @@ export function UsagePage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [windowVersion, setWindowVersion] = useState(0);
   const hasLoadedRef = useRef(false);
   const forceRefreshRef = useRef(false);
 
-  const window = useMemo(() => makeWindow(windowDays), [windowDays]);
+  const window = useMemo(() => makeWindow(windowDays), [windowDays, windowVersion]);
   const dataMatchesWindow =
     merged !== null &&
     merged.sinceDay === window.sinceDay &&
@@ -86,6 +87,16 @@ export function UsagePage() {
       if (force && !settled) forceRefreshRef.current = true;
     };
   }, [rpc, reloadKey, window.sinceDay, window.timeZone, window.untilDay, windowDays]);
+
+  useEffect(() => {
+    const nextMidnight = new Date();
+    nextMidnight.setHours(24, 0, 0, 0);
+    const timeout = globalThis.setTimeout(
+      () => setWindowVersion((version) => version + 1),
+      Math.max(nextMidnight.getTime() - Date.now(), 1),
+    );
+    return () => globalThis.clearTimeout(timeout);
+  }, [window.untilDay]);
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),

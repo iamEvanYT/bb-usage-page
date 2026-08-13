@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { DailyTotals, UsageChartMetric, UsageProviderKind } from "../../lib/types";
 import { PROVIDER_ORDER } from "../../lib/types";
 import { formatDayShort, formatTokens, formatUsd } from "../../lib/format";
@@ -119,6 +119,11 @@ export function UsageProviderChart({
   metric: UsageChartMetric;
 }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    setHoverIndex(null);
+  }, [days, metric]);
+
   const byDay = useMemo(() => {
     const map = new Map<string, DailyTotals>();
     for (const entry of daily) map.set(entry.day, entry);
