@@ -9,11 +9,12 @@ import type {
 /**
  * Bump when parse / filter semantics change so durable entries are discarded.
  * v2: ignore `<synthetic>`; Codex fork suppression is subagent-only.
+ * v3: suppress copied history for any `forked_from_id` (not just subagent spawn).
  */
-export const USAGE_SCAN_CACHE_VERSION = 2 as const;
+export const USAGE_SCAN_CACHE_VERSION = 3 as const;
 
 /** Bump when aggregated base shape or pricing inputs change. */
-export const USAGE_BASE_CACHE_VERSION = 1 as const;
+export const USAGE_BASE_CACHE_VERSION = 2 as const;
 
 export interface CachedFile {
   size: number;

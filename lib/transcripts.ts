@@ -98,11 +98,13 @@ export function initialCodexScanState(): CodexScanState {
 const FORK_COPY_MAX_GAP_MS = 1000;
 
 /**
- * Only subagent thread_spawn rollouts copy parent history in a burst.
- * Plain `forked_from_id` (e.g. editor resume) must not suppress the first second
- * of genuine usage.
+ * Forked / resumed rollouts and subagent thread_spawn copies copy parent
+ * history into the new file. That history was already counted from the parent
+ * rollout — suppress the leading burst so it is not double-counted (and not
+ * attributed to the fork's wall-clock day).
  */
-function isSubagentSpawnMeta(payload: Record<string, unknown>): boolean {
+function isForkedSessionMeta(payload: Record<string, unknown>): boolean {
+  if (typeof payload.forked_from_id === "string") return true;
   const source = payload.source;
   if (typeof source !== "object" || source === null) return false;
   const subagent = (source as Record<string, unknown>).subagent;
@@ -134,7 +136,7 @@ export function parseCodexLine(
     const id = payloadRecord.id ?? payloadRecord.session_id;
     if (typeof id === "string") state.sessionId = id;
     const metaTimestampMs = parseTimestampMs(record.timestamp);
-    if (metaTimestampMs !== null && isSubagentSpawnMeta(payloadRecord)) {
+    if (metaTimestampMs !== null && isForkedSessionMeta(payloadRecord)) {
       state.suppressingForkCopies = true;
       state.forkCopyAnchorMs = metaTimestampMs;
     }
