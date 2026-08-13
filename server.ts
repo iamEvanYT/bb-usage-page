@@ -1,14 +1,26 @@
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
 
-import {
-  assertValidWindow,
-  isValidTimeZone,
-  makeWindow,
-} from "./lib/format";
+import { isValidTimeZone, makeWindow } from "./lib/format";
 import { USAGE_DATA_DIR } from "./lib/plugin-data";
 import { mergedUsageSchema } from "./lib/rpc-schema";
 import { UsageScanner } from "./lib/scan";
+
+const USAGE_COMMAND = "bb usage show [--days 7|30|90] [--force]";
+
+const daySchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine(
+    (value) => {
+      const parsed = new Date(`${value}T00:00:00.000Z`);
+      return (
+        !Number.isNaN(parsed.getTime()) &&
+        parsed.toISOString().slice(0, 10) === value
+      );
+    },
+    { message: "Invalid calendar date" },
+  );
 
 export const rpcContract = defineRpcContract({
   getUsage: {
@@ -20,8 +32,8 @@ export const rpcContract = defineRpcContract({
           .refine((value) => isValidTimeZone(value), {
             message: "Invalid IANA time zone",
           }),
-        sinceDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-        untilDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        sinceDay: daySchema,
+        untilDay: daySchema,
         force: z.boolean().optional(),
       })
       .strict()
@@ -33,14 +45,46 @@ export const rpcContract = defineRpcContract({
   },
 });
 
-function parseDays(argv: readonly string[]): 7 | 30 | 90 {
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === "--days" && argv[i + 1]) {
-      const value = Number(argv[i + 1]);
-      if (value === 7 || value === 30 || value === 90) return value;
+type UsageCliOptions =
+  | { days: 7 | 30 | 90; force: boolean }
+  | { error: string };
+
+function parseCliOptions(argv: readonly string[]): UsageCliOptions {
+  if (argv[0] !== "show") {
+    return { error: `Expected \"show\". Usage: ${USAGE_COMMAND}` };
+  }
+
+  let days: 7 | 30 | 90 = 30;
+  let force = false;
+  let sawDays = false;
+
+  for (let i = 1; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--days") {
+      const value = argv[i + 1];
+      if (
+        sawDays ||
+        value === undefined ||
+        !["7", "30", "90"].includes(value)
+      ) {
+        return {
+          error: `--days must be specified once as 7, 30, or 90. Usage: ${USAGE_COMMAND}`,
+        };
+      }
+      days = Number(value) as 7 | 30 | 90;
+      sawDays = true;
+      i += 1;
+    } else if (arg === "--force") {
+      if (force) {
+        return { error: `--force must not be repeated. Usage: ${USAGE_COMMAND}` };
+      }
+      force = true;
+    } else {
+      return { error: `Unknown argument: ${arg}. Usage: ${USAGE_COMMAND}` };
     }
   }
-  return 30;
+
+  return { days, force };
 }
 
 export default async function plugin(bb: BbPluginApi) {
@@ -51,7 +95,6 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     async getUsage({ sinceDay, untilDay, timeZone, force }) {
-      assertValidWindow({ sinceDay, untilDay, timeZone });
       const { merged } = await scanner.readSummary({
         sinceDay,
         untilDay,
@@ -62,9 +105,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.onDispose(() => {
-    void scanner.flush();
-  });
+  bb.onDispose(() => scanner.flush());
 
   bb.cli.register({
     name: "usage",
@@ -77,14 +118,16 @@ export default async function plugin(bb: BbPluginApi) {
       },
     ],
     async run(argv) {
-      const days = parseDays(argv);
-      const force = argv.includes("--force");
-      const { sinceDay, untilDay, timeZone } = makeWindow(days);
+      const options = parseCliOptions(argv);
+      if ("error" in options) {
+        return { exitCode: 2, stderr: `${options.error}\n` };
+      }
+      const { sinceDay, untilDay, timeZone } = makeWindow(options.days);
       const { merged } = await scanner.readSummary({
         sinceDay,
         untilDay,
         timeZone,
-        force,
+        force: options.force,
       });
 
       const cacheLabel = merged.cache.summaryHit

@@ -1,11 +1,13 @@
 import { z } from "zod";
 
+import type { MergedUsage } from "./types";
+
 const providerKind = z.enum(["claude", "codex", "pi"]);
 
 const providerAmount = z.object({
   costUsd: z.number(),
   totalTokens: z.number(),
-});
+}).strict();
 
 export const mergedUsageSchema = z.object({
   costUsd: z.number(),
@@ -25,7 +27,7 @@ export const mergedUsageSchema = z.object({
       records: z.number().int(),
       costShare: z.number(),
       tokenShare: z.number(),
-    }),
+    }).strict(),
   ),
   models: z.array(
     z.object({
@@ -35,7 +37,7 @@ export const mergedUsageSchema = z.object({
       totalTokens: z.number(),
       records: z.number().int(),
       costShare: z.number(),
-    }),
+    }).strict(),
   ),
   daily: z.array(
     z.object({
@@ -46,15 +48,15 @@ export const mergedUsageSchema = z.object({
         claude: providerAmount,
         codex: providerAmount,
         pi: providerAmount,
-      }),
-    }),
+      }).strict(),
+    }).strict(),
   ),
   costQuality: z.object({
     providerReportedShare: z.number(),
     modelPricedShare: z.number(),
     unpricedShare: z.number(),
     cacheSavingsUsd: z.number(),
-  }),
+  }).strict(),
   sources: z.array(
     z.object({
       provider: providerKind,
@@ -64,14 +66,14 @@ export const mergedUsageSchema = z.object({
       skippedFiles: z.number().int(),
       distinctSessions: z.number().int(),
       message: z.string().nullable(),
-    }),
+    }).strict(),
   ),
   pricing: z.object({
     status: z.enum(["fresh", "cached", "unavailable"]),
     source: z.string(),
     fetchedAt: z.string().nullable(),
     knownModels: z.number().int(),
-  }),
+  }).strict(),
   scanDurationMs: z.number().int(),
   sinceDay: z.string(),
   untilDay: z.string(),
@@ -82,5 +84,5 @@ export const mergedUsageSchema = z.object({
     fileHits: z.number().int(),
     fileMisses: z.number().int(),
     filesParsed: z.number().int(),
-  }),
-});
+  }).strict(),
+}).strict() satisfies z.ZodType<MergedUsage>;
