@@ -3,9 +3,18 @@ import type { UsageProviderKind, UsageRecord, UsageTokenTotals } from "./types";
 import { totalTokens } from "./types";
 
 function int(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? Math.trunc(value)
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
     : 0;
+}
+
+function nonNegativeCost(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= Number.MAX_SAFE_INTEGER
+    ? value
+    : null;
 }
 
 function parseTimestampMs(value: unknown): number | null {
@@ -54,7 +63,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
   const dedupeKey =
     messageId === null && requestId === null
       ? null
-      : `${messageId ?? ""}:${requestId ?? ""}`;
+      : JSON.stringify([messageId, requestId]);
   const cost = record.costUSD;
 
   return {
@@ -69,8 +78,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
       outputTokens: int(usageRecord.output_tokens),
       reasoningTokens: 0,
     },
-    reportedCostUsd:
-      typeof cost === "number" && Number.isFinite(cost) ? cost : null,
+    reportedCostUsd: nonNegativeCost(cost),
     dedupeKey,
   };
 }
@@ -79,6 +87,7 @@ export interface CodexScanState {
   model: string;
   sessionId: string;
   lastUsageSignature: string | null;
+  lastUsageTimestampMs: number | null;
   sawSessionMeta: boolean;
   suppressingForkCopies: boolean;
   forkCopyAnchorMs: number;
@@ -89,6 +98,7 @@ export function initialCodexScanState(): CodexScanState {
     model: "",
     sessionId: "",
     lastUsageSignature: null,
+    lastUsageTimestampMs: null,
     sawSessionMeta: false,
     suppressingForkCopies: false,
     forkCopyAnchorMs: 0,
@@ -96,6 +106,7 @@ export function initialCodexScanState(): CodexScanState {
 }
 
 const FORK_COPY_MAX_GAP_MS = 1000;
+const DUPLICATE_USAGE_MAX_GAP_MS = 1000;
 
 /**
  * Forked / resumed rollouts and subagent thread_spawn copies copy parent
@@ -160,8 +171,14 @@ export function parseCodexLine(
   if (state.model.length === 0) return null;
 
   const signature = JSON.stringify(lastRecord);
-  if (signature === state.lastUsageSignature) return null;
+  const duplicateUsage =
+    signature === state.lastUsageSignature &&
+    state.lastUsageTimestampMs !== null &&
+    timestampMs >= state.lastUsageTimestampMs &&
+    timestampMs - state.lastUsageTimestampMs < DUPLICATE_USAGE_MAX_GAP_MS;
   state.lastUsageSignature = signature;
+  state.lastUsageTimestampMs = timestampMs;
+  if (duplicateUsage) return null;
 
   if (state.suppressingForkCopies) {
     if (timestampMs - state.forkCopyAnchorMs < FORK_COPY_MAX_GAP_MS) {
@@ -175,6 +192,7 @@ export function parseCodexLine(
   const cachedInputTokens = int(lastRecord.cached_input_tokens);
   const cacheCreationTokens = int(lastRecord.cache_write_input_tokens);
   const outputTokens = int(lastRecord.output_tokens);
+  if (cachedInputTokens + cacheCreationTokens > inputTokens) return null;
   const totals: UsageTokenTotals = {
     uncachedInputTokens: Math.max(
       0,
@@ -261,13 +279,13 @@ export function parsePiLine(
 
   let reportedCostUsd: number | null = null;
   const cost = usageRecord.cost;
-  if (typeof cost === "number" && Number.isFinite(cost)) {
-    reportedCostUsd = cost;
+  const directCost = nonNegativeCost(cost);
+  if (directCost !== null) {
+    reportedCostUsd = directCost;
   } else if (typeof cost === "object" && cost !== null) {
-    const total = (cost as Record<string, unknown>).total;
-    if (typeof total === "number" && Number.isFinite(total)) {
-      reportedCostUsd = total;
-    }
+    reportedCostUsd = nonNegativeCost(
+      (cost as Record<string, unknown>).total,
+    );
   }
 
   const id =
