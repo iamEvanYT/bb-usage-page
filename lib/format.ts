@@ -1,5 +1,11 @@
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+export function isValidDay(day: string): boolean {
+  if (!DAY_RE.test(day)) return false;
+  const parsed = new Date(`${day}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === day;
+}
+
 export function formatUsd(value: number): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -59,7 +65,7 @@ export function enumerateDays(
   untilDay: string,
 ): readonly string[] {
   const days: string[] = [];
-  if (!DAY_RE.test(sinceDay) || !DAY_RE.test(untilDay) || sinceDay > untilDay) {
+  if (!isValidDay(sinceDay) || !isValidDay(untilDay) || sinceDay > untilDay) {
     return days;
   }
   const [year = 0, month = 1, dayOfMonth = 1] = sinceDay
@@ -152,8 +158,8 @@ export function assertValidWindow(input: {
   untilDay: string;
   timeZone: string;
 }): void {
-  if (!DAY_RE.test(input.sinceDay) || !DAY_RE.test(input.untilDay)) {
-    throw new Error("sinceDay and untilDay must be YYYY-MM-DD");
+  if (!isValidDay(input.sinceDay) || !isValidDay(input.untilDay)) {
+    throw new Error("sinceDay and untilDay must be valid YYYY-MM-DD dates");
   }
   if (input.sinceDay > input.untilDay) {
     throw new Error("sinceDay must be on or before untilDay");

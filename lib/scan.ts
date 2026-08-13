@@ -70,6 +70,7 @@ interface TranscriptFile {
   path: string;
   size: number;
   mtimeMs: number;
+  ctimeMs: number;
 }
 
 export interface UsageScanDeps {
@@ -103,6 +104,7 @@ export interface ScanStats {
 }
 
 function expandHome(path: string): string {
+  if (path === "~") return NodeOS.homedir();
   if (path.startsWith("~/")) {
     return NodePath.join(NodeOS.homedir(), path.slice(2));
   }
@@ -140,8 +142,16 @@ async function listTranscriptFiles(
       if (!entry.name.endsWith(".jsonl")) continue;
       try {
         const stats = await NodeFSP.stat(child);
-        if (stats.mtimeMs >= sinceMs) {
-          found.push({ path: child, size: stats.size, mtimeMs: stats.mtimeMs });
+        // Copies/restores can preserve mtime, but their ctime still identifies
+        // them as newly materialized and prevents a cold cache from missing
+        // in-window records.
+        if (stats.mtimeMs >= sinceMs || stats.ctimeMs >= sinceMs) {
+          found.push({
+            path: child,
+            size: stats.size,
+            mtimeMs: stats.mtimeMs,
+            ctimeMs: stats.ctimeMs,
+          });
         }
       } catch {
         // vanished
@@ -202,6 +212,22 @@ function dedupeWithinFile(records: readonly UsageRecord[]): UsageRecord[] {
     }
     if (seen.has(record.dedupeKey)) continue;
     seen.add(record.dedupeKey);
+    out.push(record);
+  }
+  return out;
+}
+
+function dedupeAcrossFiles(records: readonly UsageRecord[]): UsageRecord[] {
+  const seen = new Set<string>();
+  const out: UsageRecord[] = [];
+  for (const record of records) {
+    if (record.dedupeKey === null) {
+      out.push(record);
+      continue;
+    }
+    const key = `${record.provider}\0${record.sessionId}\0${record.dedupeKey}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     out.push(record);
   }
   return out;
@@ -346,7 +372,14 @@ export class UsageScanner {
   }
 
   async flush(): Promise<void> {
-    await this.persistCaches();
+    // Share the read queue so a dispose-triggered flush cannot snapshot cache
+    // state while a scan is still mutating it.
+    const run = this.readChain.then(() => this.persistCaches());
+    this.readChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
   }
 
   private async clearDurableCaches(): Promise<void> {
@@ -448,25 +481,39 @@ export class UsageScanner {
       for (const file of files) byPath.set(file.path, file);
     }
 
-    // Restored/copied transcripts can have stale mtimes. If we already parsed
-    // them, keep them in the window when their records land inside it.
-    for (const [path, entry] of this.fileCache) {
-      if (byPath.has(path)) continue;
-      if (!roots.some((root) => path === root || path.startsWith(`${root}/`))) {
-        continue;
-      }
-      const inWindow = entry.records.some((record) => {
-        if (isIgnoredUsageModel(record.model)) return false;
-        const day = dayInTimeZone(record.timestampMs, timeZone);
-        return day >= sinceDay && day <= untilDay;
-      });
-      if (inWindow) {
-        byPath.set(path, {
-          path,
-          size: entry.size,
-          mtimeMs: entry.mtimeMs,
+    // Restored/copied transcripts can have stale mtimes. Re-check cached files
+    // whose parsed records land in the window, but never resurrect a deletion.
+    const restored = await Promise.all(
+      [...this.fileCache].map(async ([path, entry]) => {
+        if (byPath.has(path)) return null;
+        if (
+          !roots.some((root) => path === root || path.startsWith(`${root}/`))
+        ) {
+          return null;
+        }
+        const inWindow = entry.records.some((record) => {
+          if (isIgnoredUsageModel(record.model)) return false;
+          const day = dayInTimeZone(record.timestampMs, timeZone);
+          return day >= sinceDay && day <= untilDay;
         });
-      }
+        if (!inWindow) return null;
+
+        try {
+          const stats = await NodeFSP.stat(path);
+          if (!stats.isFile()) return null;
+          return {
+            path,
+            size: stats.size,
+            mtimeMs: stats.mtimeMs,
+            ctimeMs: stats.ctimeMs,
+          };
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const file of restored) {
+      if (file) byPath.set(file.path, file);
     }
 
     return { files: [...byPath.values()], roots: [...roots] };
@@ -500,6 +547,7 @@ export class UsageScanner {
         cached &&
         cached.size === file.size &&
         cached.mtimeMs === file.mtimeMs &&
+        cached.ctimeMs === file.ctimeMs &&
         cached.provider === provider
       ) {
         fileRecords = cached.records;
@@ -518,6 +566,7 @@ export class UsageScanner {
         this.fileCache.set(file.path, {
           size: file.size,
           mtimeMs: file.mtimeMs,
+          ctimeMs: file.ctimeMs,
           provider,
           records: fileRecords,
         });
@@ -770,7 +819,6 @@ export class UsageScanner {
     const removed = pruneScanCache(this.fileCache, {
       livePaths,
       walkedRoots,
-      windowStartMs: sinceMs,
       retentionCutoffMs,
     });
     if (removed > 0) this.fileCacheDirty = true;
@@ -784,7 +832,11 @@ export class UsageScanner {
       codex.stats.filesParsed +
       pi.stats.filesParsed;
 
-    const allRecords = [...claude.records, ...codex.records, ...pi.records];
+    const allRecords = dedupeAcrossFiles([
+      ...claude.records,
+      ...codex.records,
+      ...pi.records,
+    ]);
     const { buckets, sessionsByDay } = aggregateBuckets(
       allRecords,
       this.rates,
@@ -875,7 +927,16 @@ function aggregateBuckets(
       }
       daySessions.add(record.sessionId);
     }
-    const key = `${day}\0${record.provider}\0${record.model}`;
+    const priced = priceUsage(
+      rates,
+      record.model,
+      record.totals,
+      record.reportedCostUsd,
+    );
+    // A model/day can mix provider-reported, priced, and unpriced records.
+    // Keep these buckets homogeneous so cost-quality shares count records
+    // rather than inheriting the strongest source of a neighboring record.
+    const key = `${day}\0${record.provider}\0${record.model}\0${priced.costSource}`;
     let entry = map.get(key);
     if (!entry) {
       entry = {
@@ -886,7 +947,7 @@ function aggregateBuckets(
           totals: { ...EMPTY_TOTALS },
           costUsd: 0,
           cacheSavingsUsd: 0,
-          costSource: "unpriced",
+          costSource: priced.costSource,
           records: 0,
           unpricedRecords: 0,
           sessions: 0,
@@ -896,12 +957,6 @@ function aggregateBuckets(
       map.set(key, entry);
     }
 
-    const priced = priceUsage(
-      rates,
-      record.model,
-      record.totals,
-      record.reportedCostUsd,
-    );
     entry.bucket.totals = addTotals(entry.bucket.totals, record.totals);
     entry.bucket.costUsd += priced.costUsd;
     entry.bucket.cacheSavingsUsd += cacheSavingsUsd(
@@ -913,14 +968,6 @@ function aggregateBuckets(
     if (priced.costSource === "unpriced") entry.bucket.unpricedRecords += 1;
     if (record.sessionId) entry.sessionIds.add(record.sessionId);
 
-    if (priced.costSource === "providerReported") {
-      entry.bucket.costSource = "providerReported";
-    } else if (
-      entry.bucket.costSource !== "providerReported" &&
-      priced.costSource === "modelPriced"
-    ) {
-      entry.bucket.costSource = "modelPriced";
-    }
   }
 
   const buckets = [...map.values()]

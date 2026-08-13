@@ -1,24 +1,28 @@
+import { isValidDay } from "./format";
 import type {
   UsageBucket,
   UsageProviderKind,
   UsageRecord,
   UsageSource,
   UsageSummary,
+  UsageTokenTotals,
 } from "./types";
 
 /**
  * Bump when parse / filter semantics change so durable entries are discarded.
  * v2: ignore `<synthetic>`; Codex fork suppression is subagent-only.
  * v3: suppress copied history for any `forked_from_id` (not just subagent spawn).
+ * v4: include ctime in file identity to reject same-size rewrites with mtime restored.
  */
-export const USAGE_SCAN_CACHE_VERSION = 3 as const;
+export const USAGE_SCAN_CACHE_VERSION = 4 as const;
 
-/** Bump when aggregated base shape or pricing inputs change. */
-export const USAGE_BASE_CACHE_VERSION = 2 as const;
+/** v4: buckets are now homogeneous by pricing source for accurate cost quality. */
+export const USAGE_BASE_CACHE_VERSION = 4 as const;
 
 export interface CachedFile {
   size: number;
   mtimeMs: number;
+  ctimeMs: number;
   provider: UsageProviderKind;
   records: UsageRecord[];
 }
@@ -41,6 +45,7 @@ type SerializedRecord = readonly [
 interface SerializedFile {
   s: number;
   m: number;
+  c: number;
   p: UsageProviderKind;
   r: readonly SerializedRecord[];
 }
@@ -76,6 +81,7 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     files[path] = {
       s: entry.size,
       m: entry.mtimeMs,
+      c: entry.ctimeMs,
       p: entry.provider,
       r: entry.records.map((record) => [
         record.timestampMs,
@@ -112,7 +118,13 @@ export function decodeScanCache(document: unknown): ScanCache {
   for (const [path, raw] of Object.entries(root.files)) {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as Partial<SerializedFile>;
-    if (typeof entry.s !== "number" || typeof entry.m !== "number") continue;
+    if (
+      !isNonNegativeFiniteNumber(entry.s) ||
+      !isNonNegativeFiniteNumber(entry.m) ||
+      !isNonNegativeFiniteNumber(entry.c)
+    ) {
+      continue;
+    }
     if (entry.p !== "claude" && entry.p !== "codex" && entry.p !== "pi") {
       continue;
     }
@@ -122,7 +134,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     const records: UsageRecord[] = [];
     let corrupt = false;
     for (const row of entry.r) {
-      if (!Array.isArray(row) || row.length < 10) {
+      if (!Array.isArray(row) || row.length !== 10) {
         corrupt = true;
         break;
       }
@@ -140,14 +152,18 @@ export function decodeScanCache(document: unknown): ScanCache {
       ] = row as unknown as SerializedRecord;
       const model = typeof modelIdx === "number" ? models[modelIdx] : undefined;
       if (
-        typeof timestampMs !== "number" ||
-        !Number.isFinite(timestampMs) ||
+        !isNonNegativeFiniteNumber(timestampMs) ||
         model === undefined ||
-        !Number.isFinite(uncached) ||
-        !Number.isFinite(cached) ||
-        !Number.isFinite(cacheCreation) ||
-        !Number.isFinite(output) ||
-        !Number.isFinite(reasoning)
+        !Number.isInteger(modelIdx) ||
+        !Number.isInteger(sessionIdx) ||
+        !isNonNegativeFiniteNumber(uncached) ||
+        !isNonNegativeFiniteNumber(cached) ||
+        !isNonNegativeFiniteNumber(cacheCreation) ||
+        !isNonNegativeFiniteNumber(output) ||
+        !isNonNegativeFiniteNumber(reasoning) ||
+        reasoning > output ||
+        (dedupeKey !== null && typeof dedupeKey !== "string") ||
+        (reportedCostUsd !== null && !Number.isFinite(reportedCostUsd))
       ) {
         corrupt = true;
         break;
@@ -175,6 +191,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     cache.set(path, {
       size: entry.s,
       mtimeMs: entry.m,
+      ctimeMs: entry.c,
       provider,
       records,
     });
@@ -192,7 +209,6 @@ export function pruneScanCache(
   options: {
     livePaths: ReadonlySet<string>;
     walkedRoots: readonly string[];
-    windowStartMs: number;
     retentionCutoffMs: number;
   },
 ): number {
@@ -202,10 +218,7 @@ export function pruneScanCache(
     const underWalkedRoot = options.walkedRoots.some((root) =>
       pathUnderRoot(path, root),
     );
-    const deleted =
-      underWalkedRoot &&
-      entry.mtimeMs >= options.windowStartMs &&
-      !options.livePaths.has(path);
+    const deleted = underWalkedRoot && !options.livePaths.has(path);
     if (agedOut || deleted) {
       cache.delete(path);
       removed += 1;
@@ -215,10 +228,17 @@ export function pruneScanCache(
 }
 
 export function fingerprintFiles(
-  files: readonly { path: string; size: number; mtimeMs: number }[],
+  files: readonly {
+    path: string;
+    size: number;
+    mtimeMs: number;
+    ctimeMs: number;
+  }[],
 ): string {
   const parts = files
-    .map((file) => `${file.path}\0${file.size}\0${file.mtimeMs}`)
+    .map(
+      (file) => `${file.path}\0${file.size}\0${file.mtimeMs}\0${file.ctimeMs}`,
+    )
     .sort();
   // FNV-1a 64-bit-ish string hash — fast, good enough for invalidation.
   let hash = 2166136261;
@@ -302,21 +322,29 @@ export function decodeBaseCache(document: unknown): PersistedBaseScan | null {
     typeof root.timeZone !== "string" ||
     typeof root.fingerprint !== "string" ||
     typeof root.ratesKey !== "string" ||
-    typeof root.computedAtMs !== "number" ||
+    !isNonNegativeFiniteNumber(root.computedAtMs) ||
     !Array.isArray(root.buckets) ||
     !Array.isArray(root.sources) ||
     typeof root.pricing !== "object" ||
     root.pricing === null ||
     typeof root.sessionsByDay !== "object" ||
     root.sessionsByDay === null ||
-    typeof root.fileCount !== "number"
+    !isNonNegativeInteger(root.fileCount) ||
+    !isValidDay(root.sinceDay) ||
+    !isValidDay(root.untilDay) ||
+    root.sinceDay > root.untilDay ||
+    !isPricing(root.pricing) ||
+    !root.buckets.every(isUsageBucket) ||
+    !root.sources.every(isUsageSource)
   ) {
     return null;
   }
 
   const sessionsByDay = new Map<string, Set<string>>();
   for (const [day, ids] of Object.entries(root.sessionsByDay)) {
-    if (!Array.isArray(ids)) continue;
+    if (!isValidDay(day) || !Array.isArray(ids) || !ids.every(isString)) {
+      return null;
+    }
     sessionsByDay.set(
       day,
       new Set(ids.filter((id): id is string => typeof id === "string")),
@@ -335,8 +363,88 @@ export function decodeBaseCache(document: unknown): PersistedBaseScan | null {
     pricing: root.pricing,
     sessionsByDay,
     fileCount: root.fileCount,
-    fileHits: typeof root.fileHits === "number" ? root.fileHits : 0,
-    fileMisses: typeof root.fileMisses === "number" ? root.fileMisses : 0,
-    filesParsed: typeof root.filesParsed === "number" ? root.filesParsed : 0,
+    fileHits: isNonNegativeInteger(root.fileHits) ? root.fileHits : 0,
+    fileMisses: isNonNegativeInteger(root.fileMisses) ? root.fileMisses : 0,
+    filesParsed: isNonNegativeInteger(root.filesParsed) ? root.filesParsed : 0,
   };
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return isNonNegativeFiniteNumber(value) && Number.isInteger(value);
+}
+
+function isProvider(value: unknown): value is UsageProviderKind {
+  return value === "claude" || value === "codex" || value === "pi";
+}
+
+function isTokenTotals(value: unknown): value is UsageTokenTotals {
+  if (typeof value !== "object" || value === null) return false;
+  const totals = value as Partial<UsageTokenTotals>;
+  return (
+    isNonNegativeFiniteNumber(totals.uncachedInputTokens) &&
+    isNonNegativeFiniteNumber(totals.cachedInputTokens) &&
+    isNonNegativeFiniteNumber(totals.cacheCreationTokens) &&
+    isNonNegativeFiniteNumber(totals.outputTokens) &&
+    isNonNegativeFiniteNumber(totals.reasoningTokens) &&
+    totals.reasoningTokens <= totals.outputTokens
+  );
+}
+
+function isUsageBucket(value: unknown): value is UsageBucket {
+  if (typeof value !== "object" || value === null) return false;
+  const bucket = value as Partial<UsageBucket>;
+  return (
+    typeof bucket.day === "string" &&
+    isValidDay(bucket.day) &&
+    isProvider(bucket.provider) &&
+    typeof bucket.model === "string" &&
+    isTokenTotals(bucket.totals) &&
+    isNonNegativeFiniteNumber(bucket.costUsd) &&
+    isNonNegativeFiniteNumber(bucket.cacheSavingsUsd) &&
+    (bucket.costSource === "providerReported" ||
+      bucket.costSource === "modelPriced" ||
+      bucket.costSource === "unpriced") &&
+    isNonNegativeInteger(bucket.records) &&
+    isNonNegativeInteger(bucket.unpricedRecords) &&
+    bucket.unpricedRecords <= bucket.records &&
+    isNonNegativeInteger(bucket.sessions)
+  );
+}
+
+function isUsageSource(value: unknown): value is UsageSource {
+  if (typeof value !== "object" || value === null) return false;
+  const source = value as Partial<UsageSource>;
+  return (
+    isProvider(source.provider) &&
+    typeof source.path === "string" &&
+    (source.status === "ok" ||
+      source.status === "missing" ||
+      source.status === "partial" ||
+      source.status === "failed") &&
+    isNonNegativeInteger(source.scannedFiles) &&
+    isNonNegativeInteger(source.skippedFiles) &&
+    isNonNegativeInteger(source.distinctSessions) &&
+    (source.message === null || typeof source.message === "string")
+  );
+}
+
+function isPricing(value: unknown): value is UsageSummary["pricing"] {
+  if (typeof value !== "object" || value === null) return false;
+  const pricing = value as Partial<UsageSummary["pricing"]>;
+  return (
+    (pricing.status === "fresh" ||
+      pricing.status === "cached" ||
+      pricing.status === "unavailable") &&
+    typeof pricing.source === "string" &&
+    (pricing.fetchedAt === null || typeof pricing.fetchedAt === "string") &&
+    isNonNegativeInteger(pricing.knownModels)
+  );
 }
