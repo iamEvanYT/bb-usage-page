@@ -22,6 +22,7 @@ const WINDOW_OPTIONS = [
   { days: 30 as const, label: "30 days" },
   { days: 90 as const, label: "90 days" },
 ];
+const SKELETON_DELAY_MS = 30;
 
 function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
@@ -36,8 +37,8 @@ export function UsagePage() {
   );
   const [merged, setMerged] = useState<MergedUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [showSkeleton, setShowSkeleton] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
   const [windowVersion, setWindowVersion] = useState(0);
   const hasLoadedRef = useRef(false);
@@ -49,6 +50,19 @@ export function UsagePage() {
     merged.sinceDay === window.sinceDay &&
     merged.untilDay === window.untilDay &&
     merged.timeZone === window.timeZone;
+  const waitingForData = !dataMatchesWindow && !error;
+
+  useEffect(() => {
+    if (!waitingForData) {
+      setShowSkeleton(false);
+      return;
+    }
+    const timeout = globalThis.setTimeout(
+      () => setShowSkeleton(true),
+      SKELETON_DELAY_MS,
+    );
+    return () => globalThis.clearTimeout(timeout);
+  }, [waitingForData]);
 
   useEffect(() => {
     let cancelled = false;
@@ -58,7 +72,6 @@ export function UsagePage() {
     // it back so Strict Mode / rapid toggles still hard-refresh once.
     forceRefreshRef.current = false;
     if (hasLoadedRef.current) setRefreshing(true);
-    else setLoading(true);
     setError(null);
     void rpc
       .call("getUsage", {
@@ -72,7 +85,6 @@ export function UsagePage() {
         if (!cancelled) {
           hasLoadedRef.current = true;
           setMerged(result);
-          setLoading(false);
           setRefreshing(false);
         }
       })
@@ -80,7 +92,6 @@ export function UsagePage() {
         settled = true;
         if (!cancelled) {
           setError(err instanceof Error ? err.message : String(err));
-          setLoading(false);
           setRefreshing(false);
         }
       });
@@ -101,8 +112,8 @@ export function UsagePage() {
   }, [window.untilDay]);
 
   const days = useMemo(
-    () => enumerateDays(window.sinceDay, window.untilDay),
-    [window.sinceDay, window.untilDay],
+    () => (merged ? enumerateDays(merged.sinceDay, merged.untilDay) : []),
+    [merged],
   );
 
   const orderedProviders = useMemo(() => {
@@ -171,13 +182,13 @@ export function UsagePage() {
           </div>
         </div>
 
-        {loading || (!dataMatchesWindow && !error) ? (
+        {showSkeleton ? (
           <UsageSkeleton />
         ) : error ? (
           <div className="rounded-md border border-destructive/40 px-4 py-3 text-sm text-destructive">
             Failed to load usage: {error}
           </div>
-        ) : merged && dataMatchesWindow ? (
+        ) : merged ? (
           <>
             <section className="grid gap-6 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
               <div className="flex flex-col gap-5">
