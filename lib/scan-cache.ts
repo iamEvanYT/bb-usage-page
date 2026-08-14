@@ -15,11 +15,12 @@ import type {
  * v4: include ctime in file identity to reject same-size rewrites with mtime restored.
  * v5: Codex adjacent-only signature dedupe; Claude structured dedupe keys;
  *     reject malformed Codex cache splits.
+ * v6: persist workspace cwd / projectPath on each record.
  */
-export const USAGE_SCAN_CACHE_VERSION = 5 as const;
+export const USAGE_SCAN_CACHE_VERSION = 6 as const;
 
-/** v4: buckets are now homogeneous by pricing source for accurate cost quality. */
-export const USAGE_BASE_CACHE_VERSION = 4 as const;
+/** v4: homogeneous pricing-source buckets. v5: include projectPath. */
+export const USAGE_BASE_CACHE_VERSION = 5 as const;
 
 export interface CachedFile {
   size: number;
@@ -42,6 +43,7 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  projectIndex: number,
 ];
 
 interface SerializedFile {
@@ -56,6 +58,7 @@ interface SerializedCache {
   version: number;
   models: readonly string[];
   sessions: readonly string[];
+  paths: readonly string[];
   files: Readonly<Record<string, SerializedFile>>;
 }
 
@@ -75,8 +78,10 @@ function intern(
 export function encodeScanCache(cache: ScanCache): SerializedCache {
   const models: string[] = [];
   const sessions: string[] = [];
+  const paths: string[] = [];
   const modelIndex = new Map<string, number>();
   const sessionIndex = new Map<string, number>();
+  const pathIndex = new Map<string, number>();
   const files: Record<string, SerializedFile> = {};
 
   for (const [path, entry] of cache) {
@@ -96,11 +101,12 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
         record.totals.reasoningTokens,
         record.dedupeKey,
         record.reportedCostUsd,
+        intern(paths, pathIndex, record.projectPath),
       ]),
     };
   }
 
-  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, files };
+  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, paths, files };
 }
 
 export function decodeScanCache(document: unknown): ScanCache {
@@ -110,12 +116,15 @@ export function decodeScanCache(document: unknown): ScanCache {
   const root = document as Partial<SerializedCache>;
   if (root.version !== USAGE_SCAN_CACHE_VERSION) return cache;
   if (!Array.isArray(root.models) || !Array.isArray(root.sessions)) return cache;
+  if (!Array.isArray(root.paths)) return cache;
   if (typeof root.files !== "object" || root.files === null) return cache;
   if (!root.models.every((value) => typeof value === "string")) return cache;
   if (!root.sessions.every((value) => typeof value === "string")) return cache;
+  if (!root.paths.every((value) => typeof value === "string")) return cache;
 
   const models = root.models as readonly string[];
   const sessions = root.sessions as readonly string[];
+  const paths = root.paths as readonly string[];
 
   for (const [path, raw] of Object.entries(root.files)) {
     if (typeof raw !== "object" || raw === null) continue;
@@ -136,7 +145,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     const records: UsageRecord[] = [];
     let corrupt = false;
     for (const row of entry.r) {
-      if (!Array.isArray(row) || row.length !== 10) {
+      if (!Array.isArray(row) || row.length !== 11) {
         corrupt = true;
         break;
       }
@@ -151,6 +160,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
+        projectIdx,
       ] = row as unknown as SerializedRecord;
       const model = typeof modelIdx === "number" ? models[modelIdx] : undefined;
       if (
@@ -158,6 +168,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         model === undefined ||
         !Number.isInteger(modelIdx) ||
         !Number.isInteger(sessionIdx) ||
+        !Number.isInteger(projectIdx) ||
         !isNonNegativeFiniteNumber(uncached) ||
         !isNonNegativeFiniteNumber(cached) ||
         !isNonNegativeFiniteNumber(cacheCreation) ||
@@ -177,6 +188,8 @@ export function decodeScanCache(document: unknown): ScanCache {
         sessionId:
           (typeof sessionIdx === "number" ? sessions[sessionIdx] : undefined) ??
           "",
+        projectPath:
+          (typeof projectIdx === "number" ? paths[projectIdx] : undefined) ?? "",
         totals: {
           uncachedInputTokens: uncached,
           cachedInputTokens: cached,
@@ -408,6 +421,7 @@ function isUsageBucket(value: unknown): value is UsageBucket {
     isValidDay(bucket.day) &&
     isProvider(bucket.provider) &&
     typeof bucket.model === "string" &&
+    typeof bucket.projectPath === "string" &&
     isTokenTotals(bucket.totals) &&
     isNonNegativeFiniteNumber(bucket.costUsd) &&
     isNonNegativeFiniteNumber(bucket.cacheSavingsUsd) &&

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useRpc } from "@bb/plugin-sdk/app";
+import { useBbNavigate, useRpc } from "@bb/plugin-sdk/app";
 import { ReloadIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { rpcContract } from "../../server";
@@ -31,7 +31,9 @@ export function UsagePage() {
   const rpc = useRpc<typeof rpcContract>();
   const [windowDays, setWindowDays] = useState<7 | 30 | 90>(30);
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
-  const [breakdown, setBreakdown] = useState<"model" | "day">("model");
+  const [breakdown, setBreakdown] = useState<"model" | "project" | "day">(
+    "model",
+  );
   const [merged, setMerged] = useState<MergedUsage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -302,7 +304,7 @@ export function UsagePage() {
                     Breakdown
                   </h2>
                   <div className="flex overflow-hidden rounded-md border border-border">
-                    {(["model", "day"] as const).map((option) => (
+                    {(["model", "project", "day"] as const).map((option) => (
                       <button
                         key={option}
                         type="button"
@@ -363,6 +365,53 @@ export function UsagePage() {
                             </td>
                             <td className="py-2 text-right text-muted-foreground tabular-nums">
                               {formatTokens(model.totalTokens)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                ) : breakdown === "project" ? (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                        <th className="py-2 font-normal">Project</th>
+                        <th className="py-2 text-right font-normal">Cost</th>
+                        <th className="py-2 text-right font-normal">Share</th>
+                        <th className="py-2 text-right font-normal">Tokens</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {merged.projects.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={4}
+                            className="py-6 text-center text-muted-foreground"
+                          >
+                            No activity in this window.
+                          </td>
+                        </tr>
+                      ) : (
+                        merged.projects.map((project) => (
+                          <tr
+                            key={`${project.projectPath}\0${project.project}`}
+                            className="border-b border-border/50"
+                          >
+                            <td className="py-2 text-foreground">
+                              <ProjectLabel
+                                name={project.project}
+                                path={project.projectPath}
+                                threadId={project.threadId}
+                              />
+                            </td>
+                            <td className="py-2 text-right text-foreground tabular-nums">
+                              {formatUsd(project.costUsd)}
+                            </td>
+                            <td className="py-2 text-right text-muted-foreground tabular-nums">
+                              {formatPercent(project.costShare)}
+                            </td>
+                            <td className="py-2 text-right text-muted-foreground tabular-nums">
+                              {formatTokens(project.totalTokens)}
                             </td>
                           </tr>
                         ))
@@ -451,6 +500,31 @@ export function UsagePage() {
         ) : null}
       </div>
     </div>
+  );
+}
+
+function ProjectLabel({
+  name,
+  path,
+  threadId,
+}: {
+  name: string;
+  path: string;
+  threadId: string | null;
+}) {
+  const navigate = useBbNavigate();
+  if (!threadId) {
+    return <span title={path || undefined}>{name}</span>;
+  }
+  return (
+    <button
+      type="button"
+      title={path || undefined}
+      onClick={() => navigate.toThread(threadId)}
+      className="cursor-pointer text-left text-foreground underline decoration-dotted decoration-foreground/25 underline-offset-2"
+    >
+      {name}
+    </button>
   );
 }
 

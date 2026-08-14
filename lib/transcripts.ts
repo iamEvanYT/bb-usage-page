@@ -71,6 +71,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     timestampMs,
     model,
     sessionId: typeof record.sessionId === "string" ? record.sessionId : "",
+    projectPath: "",
     totals: {
       uncachedInputTokens: int(usageRecord.input_tokens),
       cachedInputTokens: int(usageRecord.cache_read_input_tokens),
@@ -213,6 +214,7 @@ export function parseCodexLine(
     timestampMs,
     model: state.model,
     sessionId: state.sessionId,
+    projectPath: "",
     totals,
     reportedCostUsd: null,
     dedupeKey: null,
@@ -303,6 +305,7 @@ export function parsePiLine(
       typeof record.sessionId === "string"
         ? record.sessionId
         : sessionIdFallback,
+    projectPath: "",
     totals,
     reportedCostUsd,
     dedupeKey: id,

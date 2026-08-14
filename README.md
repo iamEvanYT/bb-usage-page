@@ -33,7 +33,8 @@ bb usage show [--days 7|30|90] [--force]
 ## Features
 
 - Sidebar **Usage** panel with 7 / 30 / 90 day windows
-- Provider split (Codex, Claude Code, Pi), daily chart, model/day breakdown
+- Provider split (Codex, Claude Code, Pi), daily chart, and model / project / day breakdown
+- Project rows map to bb projects when possible; personal `env_*` workspaces link to their thread; `~/Documents/Codex/*` chats merge into **Unassociated Codex chats**; unmatched folders stay as their own rows
 - Durable on-disk caches — only re-parse transcripts whose size/mtime changed
 - 7 / 30 / 90 day switches slice a warm 90-day base (no re-scan)
 

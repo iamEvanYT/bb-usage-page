@@ -39,6 +39,17 @@ export const mergedUsageSchema = z.object({
       costShare: z.number(),
     }).strict(),
   ),
+  projects: z.array(
+    z.object({
+      project: z.string(),
+      projectPath: z.string(),
+      threadId: z.string().nullable(),
+      costUsd: z.number(),
+      totalTokens: z.number(),
+      records: z.number().int(),
+      costShare: z.number(),
+    }).strict(),
+  ),
   daily: z.array(
     z.object({
       day: z.string(),

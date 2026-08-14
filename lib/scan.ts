@@ -5,6 +5,11 @@ import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 import { dayInTimeZone, makeWindow } from "./format";
 import {
+  extractCwdFromLine,
+  fallbackProjectName,
+  inferProjectPathFromTranscriptPath,
+} from "./projects";
+import {
   cacheSavingsUsd,
   isIgnoredUsageModel,
   LITELLM_RATES_URL,
@@ -172,6 +177,8 @@ async function readTranscriptRecords(
   const records: UsageRecord[] = [];
   const codexState = initialCodexScanState();
   const sessionIdFallback = NodePath.basename(filePath, ".jsonl");
+  let projectPath = inferProjectPathFromTranscriptPath(filePath);
+  let sawTranscriptCwd = false;
 
   try {
     const lines = NodeReadline.createInterface({
@@ -180,6 +187,14 @@ async function readTranscriptRecords(
     });
 
     for await (const line of lines) {
+      if (!sawTranscriptCwd) {
+        const cwd = extractCwdFromLine(line);
+        if (cwd) {
+          projectPath = cwd;
+          sawTranscriptCwd = true;
+        }
+      }
+
       if (provider === "codex") {
         if (!mightCarryUsage(line, provider) && !line.includes('"type"')) {
           continue;
@@ -196,7 +211,7 @@ async function readTranscriptRecords(
           : parsePiLine(line, sessionIdFallback);
       if (record) records.push(record);
     }
-    return records;
+    return records.map((record) => ({ ...record, projectPath }));
   } catch {
     return null;
   }
@@ -936,7 +951,7 @@ function aggregateBuckets(
     // A model/day can mix provider-reported, priced, and unpriced records.
     // Keep these buckets homogeneous so cost-quality shares count records
     // rather than inheriting the strongest source of a neighboring record.
-    const key = `${day}\0${record.provider}\0${record.model}\0${priced.costSource}`;
+    const key = `${day}\0${record.provider}\0${record.model}\0${record.projectPath}\0${priced.costSource}`;
     let entry = map.get(key);
     if (!entry) {
       entry = {
@@ -944,6 +959,7 @@ function aggregateBuckets(
           day,
           provider: record.provider,
           model: record.model,
+          projectPath: record.projectPath,
           totals: { ...EMPTY_TOTALS },
           costUsd: 0,
           cacheSavingsUsd: 0,
@@ -979,7 +995,8 @@ function aggregateBuckets(
       (a, b) =>
         a.day.localeCompare(b.day) ||
         a.provider.localeCompare(b.provider) ||
-        a.model.localeCompare(b.model),
+        a.model.localeCompare(b.model) ||
+        a.projectPath.localeCompare(b.projectPath),
     );
   return { buckets, sessionsByDay };
 }
@@ -1009,6 +1026,10 @@ export function mergeSummary(summary: UsageSummary): MergedUsage {
       totalTokens: number;
       records: number;
     }
+  >();
+  const projectAccumulator = new Map<
+    string,
+    { costUsd: number; totalTokens: number; records: number }
   >();
   const dailyAccumulator = new Map<
     string,
@@ -1058,6 +1079,16 @@ export function mergeSummary(summary: UsageSummary): MergedUsage {
     model.totalTokens += tokens;
     model.records += bucket.records;
     modelAccumulator.set(modelKey, model);
+
+    const project = projectAccumulator.get(bucket.projectPath) ?? {
+      costUsd: 0,
+      totalTokens: 0,
+      records: 0,
+    };
+    project.costUsd += bucket.costUsd;
+    project.totalTokens += tokens;
+    project.records += bucket.records;
+    projectAccumulator.set(bucket.projectPath, project);
 
     const day = dailyAccumulator.get(bucket.day) ?? {
       costUsd: 0,
@@ -1124,6 +1155,22 @@ export function mergeSummary(summary: UsageSummary): MergedUsage {
       .filter((model) => !isIgnoredUsageModel(model.model))
       .sort(
         (a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens,
+      ),
+    projects: [...projectAccumulator.entries()]
+      .map(([projectPath, totals]) => ({
+        project: fallbackProjectName(projectPath),
+        projectPath,
+        threadId: null,
+        costUsd: totals.costUsd,
+        totalTokens: totals.totalTokens,
+        records: totals.records,
+        costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
+      }))
+      .sort(
+        (a, b) =>
+          b.costUsd - a.costUsd ||
+          b.totalTokens - a.totalTokens ||
+          a.project.localeCompare(b.project),
       ),
     daily: [...dailyAccumulator.entries()]
       .map(([day, totals]) => ({
