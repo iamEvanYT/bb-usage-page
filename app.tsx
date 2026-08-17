@@ -5,7 +5,7 @@ import "./app.css";
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "usage",
-    title: "Usage",
+    title: "Usage Page",
     icon: "ChartColumn",
     path: "usage",
     component: UsagePage,
