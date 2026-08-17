@@ -1,4 +1,4 @@
-# Usage Page
+# Usage
 
 A [bb](https://github.com/get-bb/bb) plugin that shows Claude Code, Codex, and
 Pi token usage and estimated API cost — inspired by
@@ -24,7 +24,7 @@ From a local checkout:
 bb plugin install .
 ```
 
-Open **Usage Page** in the bb sidebar, or run:
+Open **Usage** in the bb sidebar, or run:
 
 ```bash
 bb usage show [--days 7|30|90] [--force]
@@ -32,7 +32,7 @@ bb usage show [--days 7|30|90] [--force]
 
 ## Features
 
-- Sidebar **Usage Page** panel with 7 / 30 / 90 day windows
+- Sidebar **Usage** panel with 7 / 30 / 90 day windows
 - Provider split (Codex, Claude Code, Pi), daily chart, and model / project / day breakdown
 - Project rows map to bb projects when possible; personal `env_*` workspaces link to their thread; `~/Documents/Codex/*` chats merge into **Unassociated Codex chats**; unmatched folders stay as their own rows
 - Durable on-disk caches — only re-parse transcripts whose size/mtime changed
