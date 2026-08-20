@@ -19,8 +19,11 @@ import type {
  */
 export const USAGE_SCAN_CACHE_VERSION = 6 as const;
 
-/** v4: homogeneous pricing-source buckets. v5: include projectPath. */
-export const USAGE_BASE_CACHE_VERSION = 5 as const;
+/**
+ * v4: homogeneous pricing-source buckets; v5: include projectPath;
+ * v6: Cursor; v7: Cursor auth path.
+ */
+export const USAGE_BASE_CACHE_VERSION = 7 as const;
 
 export interface CachedFile {
   size: number;
@@ -136,7 +139,12 @@ export function decodeScanCache(document: unknown): ScanCache {
     ) {
       continue;
     }
-    if (entry.p !== "claude" && entry.p !== "codex" && entry.p !== "pi") {
+    if (
+      entry.p !== "claude" &&
+      entry.p !== "codex" &&
+      entry.p !== "pi" &&
+      entry.p !== "cursor"
+    ) {
       continue;
     }
     if (!Array.isArray(entry.r)) continue;
@@ -279,6 +287,9 @@ export interface PersistedBaseScan {
   sources: UsageSource[];
   pricing: UsageSummary["pricing"];
   sessionsByDay: Map<string, Set<string>>;
+  cursorEnabled: boolean;
+  cursorDatabasePath: string;
+  cursorFetchedAtMs: number | null;
   fileCount: number;
   fileHits: number;
   fileMisses: number;
@@ -297,6 +308,9 @@ interface SerializedBaseCache {
   sources: UsageSource[];
   pricing: UsageSummary["pricing"];
   sessionsByDay: Record<string, string[]>;
+  cursorEnabled: boolean;
+  cursorDatabasePath: string;
+  cursorFetchedAtMs: number | null;
   fileCount: number;
   fileHits: number;
   fileMisses: number;
@@ -320,6 +334,9 @@ export function encodeBaseCache(base: PersistedBaseScan): SerializedBaseCache {
     sources: base.sources,
     pricing: base.pricing,
     sessionsByDay,
+    cursorEnabled: base.cursorEnabled,
+    cursorDatabasePath: base.cursorDatabasePath,
+    cursorFetchedAtMs: base.cursorFetchedAtMs,
     fileCount: base.fileCount,
     fileHits: base.fileHits,
     fileMisses: base.fileMisses,
@@ -344,6 +361,10 @@ export function decodeBaseCache(document: unknown): PersistedBaseScan | null {
     root.pricing === null ||
     typeof root.sessionsByDay !== "object" ||
     root.sessionsByDay === null ||
+    typeof root.cursorEnabled !== "boolean" ||
+    typeof root.cursorDatabasePath !== "string" ||
+    (root.cursorFetchedAtMs !== null &&
+      !isNonNegativeFiniteNumber(root.cursorFetchedAtMs)) ||
     !isNonNegativeInteger(root.fileCount) ||
     !isValidDay(root.sinceDay) ||
     !isValidDay(root.untilDay) ||
@@ -377,6 +398,9 @@ export function decodeBaseCache(document: unknown): PersistedBaseScan | null {
     sources: root.sources,
     pricing: root.pricing,
     sessionsByDay,
+    cursorEnabled: root.cursorEnabled,
+    cursorDatabasePath: root.cursorDatabasePath,
+    cursorFetchedAtMs: root.cursorFetchedAtMs,
     fileCount: root.fileCount,
     fileHits: isNonNegativeInteger(root.fileHits) ? root.fileHits : 0,
     fileMisses: isNonNegativeInteger(root.fileMisses) ? root.fileMisses : 0,
@@ -397,7 +421,12 @@ function isNonNegativeInteger(value: unknown): value is number {
 }
 
 function isProvider(value: unknown): value is UsageProviderKind {
-  return value === "claude" || value === "codex" || value === "pi";
+  return (
+    value === "claude" ||
+    value === "codex" ||
+    value === "pi" ||
+    value === "cursor"
+  );
 }
 
 function isTokenTotals(value: unknown): value is UsageTokenTotals {

@@ -1,7 +1,7 @@
 {
   "name": "bb-plugin-usage-page",
   "version": "1.2.0",
-  "description": "Usage dashboard for Claude Code, Codex, and Pi sessions in bb.",
+  "description": "Usage dashboard for Claude Code, Codex, Pi, and Cursor in bb.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -18,7 +18,7 @@
   },
   "bb": {
     "name": "Usage",
-    "description": "Track Claude Code, Codex, and Pi token usage and estimated API cost.",
+    "description": "Track Claude Code, Codex, Pi, and Cursor usage with estimated API cost.",
     "branding": {
       "icon": "ChartColumn"
     },

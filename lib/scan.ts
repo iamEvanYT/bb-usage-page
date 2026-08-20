@@ -3,7 +3,14 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
-import { dayInTimeZone, makeWindow } from "./format";
+import { readCursorAuth } from "./cursor-auth";
+import { fetchCursorUsage } from "./cursor-api";
+import {
+  dayInTimeZone,
+  localDayEndMs,
+  localDayStartMs,
+  makeWindow,
+} from "./format";
 import {
   extractCwdFromLine,
   fallbackProjectName,
@@ -41,6 +48,7 @@ import {
   parsePiLine,
 } from "./transcripts";
 import {
+  CURSOR_ACCOUNT_PROJECT_PATH,
   addTotals,
   EMPTY_TOTALS,
   PROVIDER_ORDER,
@@ -63,6 +71,7 @@ const CACHE_RETENTION_DAYS = 90;
 const BASE_HOT_TTL_MS = 15_000;
 /** Always scan this far back so 7/30/90 switches are pure in-memory slices. */
 const BASE_WINDOW_DAYS = 90;
+const CURSOR_BASE_TTL_MS = 15 * 60 * 1000;
 
 const EMPTY_CACHE_STATS = {
   summaryHit: false,
@@ -92,6 +101,16 @@ export interface ReadSummaryOptions {
    * are re-read from disk.
    */
   force?: boolean;
+  cursor?: CursorScanOptions;
+}
+
+export interface CursorScanOptions {
+  enabled: boolean;
+  databasePath?: string;
+}
+
+function cursorDatabasePath(options: CursorScanOptions | undefined): string {
+  return options?.databasePath?.trim() ?? "";
 }
 
 interface FileScanStats {
@@ -613,6 +632,69 @@ export class UsageScanner {
     };
   }
 
+  private async recordsForCursor(
+    options: CursorScanOptions | undefined,
+    sinceDay: string,
+    untilDay: string,
+    timeZone: string,
+  ): Promise<{
+    records: UsageRecord[];
+    source: UsageSource;
+    fetchedAtMs: number | null;
+  }> {
+    if (!options?.enabled) {
+      return {
+        records: [],
+        source: {
+          provider: "cursor",
+          path: "(disabled)",
+          status: "missing",
+          scannedFiles: 0,
+          skippedFiles: 0,
+          distinctSessions: 0,
+          message: "Cursor usage is disabled in plugin settings.",
+        },
+        fetchedAtMs: null,
+      };
+    }
+
+    const auth = await readCursorAuth({ databasePath: options.databasePath });
+    if (auth.auth === null) {
+      return {
+        records: [],
+        source: {
+          provider: "cursor",
+          path: auth.databasePath,
+          status: auth.status === "missing" ? "missing" : "failed",
+          scannedFiles: 0,
+          skippedFiles: 0,
+          distinctSessions: 0,
+          message: auth.message,
+        },
+        fetchedAtMs: null,
+      };
+    }
+
+    const result = await fetchCursorUsage({
+      cookie: auth.auth.cookie,
+      startDateMs: localDayStartMs(sinceDay, timeZone),
+      endDateMs: localDayEndMs(untilDay, timeZone),
+    });
+    return {
+      records: result.records,
+      source: {
+        provider: "cursor",
+        path: auth.databasePath,
+        status: result.status,
+        scannedFiles: result.fetchedEvents > 0 ? 1 : 0,
+        skippedFiles: 0,
+        distinctSessions: 0,
+        message: result.message,
+      },
+      fetchedAtMs: result.status === "ok" ? Date.now() : null,
+    };
+  }
+
   private coveringWindow(input: ReadSummaryOptions): {
     sinceDay: string;
     untilDay: string;
@@ -633,9 +715,19 @@ export class UsageScanner {
     input: ReadSummaryOptions,
     ratesKey: string,
   ): boolean {
+    const cursorEnabled = input.cursor?.enabled === true;
+    const cursorSource = base.sources.find(
+      (source) => source.provider === "cursor",
+    );
     return (
       base.timeZone === input.timeZone &&
       base.ratesKey === ratesKey &&
+      base.cursorEnabled === cursorEnabled &&
+      (!cursorEnabled ||
+        (cursorSource?.status === "ok" &&
+          base.cursorDatabasePath === cursorDatabasePath(input.cursor) &&
+          base.cursorFetchedAtMs !== null &&
+          Date.now() - base.cursorFetchedAtMs < CURSOR_BASE_TTL_MS)) &&
       base.sinceDay <= input.sinceDay &&
       base.untilDay >= input.untilDay
     );
@@ -795,7 +887,7 @@ export class UsageScanner {
       return this.sliceFromBase(base, input, started, true);
     }
 
-    const [claude, codex, pi] = await Promise.all([
+    const [claude, codex, pi, cursor] = await Promise.all([
       this.recordsForFiles(
         "claude",
         claudeFiles.files,
@@ -813,6 +905,12 @@ export class UsageScanner {
       this.recordsForFiles(
         "pi",
         piFiles.files,
+        cover.sinceDay,
+        cover.untilDay,
+        cover.timeZone,
+      ),
+      this.recordsForCursor(
+        input.cursor,
         cover.sinceDay,
         cover.untilDay,
         cover.timeZone,
@@ -851,6 +949,7 @@ export class UsageScanner {
       ...claude.records,
       ...codex.records,
       ...pi.records,
+      ...cursor.records,
     ]);
     const { buckets, sessionsByDay } = aggregateBuckets(
       allRecords,
@@ -876,9 +975,12 @@ export class UsageScanner {
       ratesKey,
       computedAtMs: Date.now(),
       buckets,
-      sources: [claude.source, codex.source, pi.source],
+      sources: [claude.source, codex.source, pi.source, cursor.source],
       pricing,
       sessionsByDay,
+      cursorEnabled: input.cursor?.enabled === true,
+      cursorDatabasePath: cursorDatabasePath(input.cursor),
+      cursorFetchedAtMs: cursor.fetchedAtMs,
       fileCount: allFiles.length,
       fileHits,
       fileMisses,
@@ -951,7 +1053,11 @@ function aggregateBuckets(
     // A model/day can mix provider-reported, priced, and unpriced records.
     // Keep these buckets homogeneous so cost-quality shares count records
     // rather than inheriting the strongest source of a neighboring record.
-    const key = `${day}\0${record.provider}\0${record.model}\0${record.projectPath}\0${priced.costSource}`;
+    const projectPath =
+      record.provider === "cursor"
+        ? CURSOR_ACCOUNT_PROJECT_PATH
+        : record.projectPath;
+    const key = `${day}\0${record.provider}\0${record.model}\0${projectPath}\0${priced.costSource}`;
     let entry = map.get(key);
     if (!entry) {
       entry = {
@@ -959,7 +1065,7 @@ function aggregateBuckets(
           day,
           provider: record.provider,
           model: record.model,
-          projectPath: record.projectPath,
+          projectPath,
           totals: { ...EMPTY_TOTALS },
           costUsd: 0,
           cacheSavingsUsd: 0,
@@ -1097,6 +1203,7 @@ export function mergeSummary(summary: UsageSummary): MergedUsage {
         claude: emptyProvider(),
         codex: emptyProvider(),
         pi: emptyProvider(),
+        cursor: emptyProvider(),
       },
     };
     day.costUsd += bucket.costUsd;

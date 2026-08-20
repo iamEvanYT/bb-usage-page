@@ -187,10 +187,35 @@ function isPreferredThread(
 }
 
 export default async function plugin(bb: BbPluginApi) {
+  const settings = bb.settings.define({
+    cursorEnabled: {
+      type: "boolean",
+      label: "Include Cursor usage",
+      description:
+        "Read Cursor's local auth read-only and include account-level usage from cursor.com. The token is held in memory only.",
+      default: false,
+    },
+    cursorDatabasePath: {
+      type: "string",
+      label: "Cursor auth database path",
+      description:
+        "Optional override for Cursor's state.vscdb path. Leave blank to use the platform default.",
+      default: "",
+    },
+  });
+
   const scanner = new UsageScanner({
     dataDir: USAGE_DATA_DIR,
     log: (message) => bb.log.info(message),
   });
+
+  async function cursorOptions() {
+    const values = await settings.get();
+    return {
+      enabled: values.cursorEnabled,
+      databasePath: values.cursorDatabasePath || undefined,
+    };
+  }
 
   async function resolveUsage(merged: MergedUsage): Promise<MergedUsage> {
     let catalog: ReturnType<typeof catalogFromBbProjects> = [];
@@ -218,6 +243,7 @@ export default async function plugin(bb: BbPluginApi) {
         untilDay,
         timeZone,
         force: force === true,
+        cursor: await cursorOptions(),
       });
       return resolveUsage(merged);
     },
@@ -227,7 +253,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.cli.register({
     name: "usage",
-    summary: "Show Claude / Codex / Pi usage totals",
+    summary: "Show Claude / Codex / Pi / Cursor usage totals",
     commands: [
       {
         name: "show",
@@ -246,8 +272,25 @@ export default async function plugin(bb: BbPluginApi) {
         untilDay,
         timeZone,
         force: options.force,
+        cursor: await cursorOptions(),
       });
       const merged = await resolveUsage(scanned);
+      const cursorSource = merged.sources.find(
+        (source) => source.provider === "cursor",
+      );
+      const visibleProviders = merged.providers.filter(
+        (provider) =>
+          provider.provider !== "cursor" ||
+          (cursorSource !== undefined && cursorSource.path !== "(disabled)"),
+      );
+      const cursorWarning =
+        cursorSource &&
+        cursorSource.path !== "(disabled)" &&
+        cursorSource.status !== "ok"
+          ? `Warning: Cursor usage is ${cursorSource.status}: ${
+              cursorSource.message || "source unavailable."
+            }`
+          : null;
 
       const cacheLabel = merged.cache.summaryHit
         ? "summary cache"
@@ -256,7 +299,8 @@ export default async function plugin(bb: BbPluginApi) {
       const lines = [
         `Usage ${sinceDay} to ${untilDay}`,
         `Raw token cost: $${merged.costUsd.toFixed(2)}`,
-        ...merged.providers.map(
+        ...(cursorWarning ? [cursorWarning] : []),
+        ...visibleProviders.map(
           (provider) =>
             `  ${provider.provider}: $${provider.costUsd.toFixed(2)} (${provider.totalTokens} tokens)`,
         ),

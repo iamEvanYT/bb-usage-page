@@ -1,7 +1,7 @@
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import type { ProjectTotals } from "./types";
+import { CURSOR_ACCOUNT_PROJECT_PATH, type ProjectTotals } from "./types";
 
 const UNKNOWN_PROJECT_LABEL = "Unknown";
 const CODEX_CHATS_LABEL = "Unassociated Codex chats";
@@ -74,6 +74,7 @@ function encodedDirAfterMarker(filePath: string, marker: string): string {
 }
 
 export function fallbackProjectName(projectPath: string): string {
+  if (projectPath === CURSOR_ACCOUNT_PROJECT_PATH) return "Cursor (account)";
   if (projectPath.length === 0) return UNKNOWN_PROJECT_LABEL;
   const base = NodePath.basename(projectPath);
   return base.length > 0 ? base : projectPath;
@@ -152,6 +153,20 @@ export function applyProjectCatalog(
   );
 
   for (const row of rows) {
+    if (row.projectPath === CURSOR_ACCOUNT_PROJECT_PATH) {
+      const existing = merged.get(CURSOR_ACCOUNT_PROJECT_PATH);
+      if (existing) {
+        addProjectTotals(existing, row);
+      } else {
+        merged.set(CURSOR_ACCOUNT_PROJECT_PATH, {
+          ...row,
+          project: "Cursor (account)",
+          projectPath: CURSOR_ACCOUNT_PROJECT_PATH,
+          threadId: null,
+        });
+      }
+      continue;
+    }
     if (codexRoot.length > 0 && pathEqualsOrUnder(row.projectPath, codexRoot)) {
       const existing = merged.get(CODEX_CHATS_KEY);
       if (existing) {

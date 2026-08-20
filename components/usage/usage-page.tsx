@@ -116,12 +116,36 @@ export function UsagePage() {
     [merged],
   );
 
+  const cursorSource = merged?.sources.find(
+    (source) => source.provider === "cursor",
+  );
+  const cursorEnabled =
+    cursorSource !== undefined && cursorSource.path !== "(disabled)";
+  const visibleProviders = useMemo(
+    () =>
+      PROVIDER_ORDER.filter(
+        (provider) => provider !== "cursor" || cursorEnabled,
+      ),
+    [cursorEnabled],
+  );
+  const cursorWarning =
+    cursorSource &&
+    cursorSource.path !== "(disabled)" &&
+    cursorSource.status !== "ok"
+      ? cursorSource.message || `Cursor usage is ${cursorSource.status}.`
+      : null;
+
   const orderedProviders = useMemo(() => {
     if (!merged) return [];
-    return [...merged.providers].sort((a, b) =>
-      metric === "cost" ? b.costUsd - a.costUsd : b.totalTokens - a.totalTokens,
-    );
-  }, [merged, metric]);
+    const visible = new Set(visibleProviders);
+    return [...merged.providers]
+      .sort((a, b) =>
+        metric === "cost"
+          ? b.costUsd - a.costUsd
+          : b.totalTokens - a.totalTokens,
+      )
+      .filter((provider) => visible.has(provider.provider));
+  }, [merged, metric, visibleProviders]);
 
   const recentDays = useMemo(
     () => (merged ? [...merged.daily].reverse().slice(0, 8) : []),
@@ -190,6 +214,18 @@ export function UsagePage() {
           </div>
         ) : merged ? (
           <>
+            {cursorWarning ? (
+              <div
+                role="status"
+                className="rounded-md border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-300"
+              >
+                Cursor usage is{" "}
+                {cursorSource?.status === "partial"
+                  ? "incomplete"
+                  : "unavailable"}
+                : {cursorWarning}
+              </div>
+            ) : null}
             <section className="grid gap-6 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
               <div className="flex flex-col gap-5">
                 <div className="flex flex-col gap-1">
@@ -269,13 +305,14 @@ export function UsagePage() {
                         </button>
                       ))}
                     </div>
-                    <UsageChartLegend />
+                    <UsageChartLegend providers={visibleProviders} />
                   </div>
                 </div>
                 <UsageProviderChart
                   days={days}
                   daily={merged.daily}
                   metric={metric}
+                  providers={visibleProviders}
                 />
               </div>
             </section>
@@ -434,7 +471,7 @@ export function UsagePage() {
                     <thead>
                       <tr className="border-b border-border text-left text-xs text-muted-foreground">
                         <th className="py-2 font-normal">Day</th>
-                        {PROVIDER_ORDER.map((provider) => (
+                        {visibleProviders.map((provider) => (
                           <th key={provider} className="py-2 text-right font-normal">
                             {PROVIDER_LABEL[provider]}
                           </th>
@@ -447,7 +484,7 @@ export function UsagePage() {
                       {recentDays.length === 0 ? (
                         <tr>
                           <td
-                            colSpan={6}
+                            colSpan={visibleProviders.length + 3}
                             className="py-6 text-center text-muted-foreground"
                           >
                             No activity in this window.
@@ -459,7 +496,7 @@ export function UsagePage() {
                             <td className="py-2 text-foreground">
                               {formatDayShort(day.day)}
                             </td>
-                            {PROVIDER_ORDER.map((provider) => (
+                            {visibleProviders.map((provider) => (
                               <td
                                 key={provider}
                                 className="py-2 text-right text-muted-foreground tabular-nums"

@@ -153,6 +153,91 @@ export function dayInTimeZone(timestampMs: number, timeZone: string): string {
   return dayFormatter(timeZone).format(new Date(timestampMs));
 }
 
+const wallClockFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function wallClockFormatter(timeZone: string): Intl.DateTimeFormat {
+  let formatter = wallClockFormatters.get(timeZone);
+  if (formatter) return formatter;
+  formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    calendar: "gregory",
+    numberingSystem: "latn",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  wallClockFormatters.set(timeZone, formatter);
+  return formatter;
+}
+
+function civilDayAfter(day: string): string {
+  const [year = 0, month = 1, dayOfMonth = 1] = day
+    .split("-")
+    .map((part) => Number.parseInt(part, 10));
+  const next = new Date(Date.UTC(year, month - 1, dayOfMonth));
+  next.setUTCDate(next.getUTCDate() + 1);
+  return next.toISOString().slice(0, 10);
+}
+
+/** Convert a civil date/time in an IANA zone to its UTC instant. */
+function localDateTimeMs(
+  day: string,
+  timeZone: string,
+  hour: number,
+  minute: number,
+  second: number,
+  millisecond: number,
+): number {
+  const [year = 0, month = 1, dayOfMonth = 1] = day
+    .split("-")
+    .map((part) => Number.parseInt(part, 10));
+  const wallMs = Date.UTC(
+    year,
+    month - 1,
+    dayOfMonth,
+    hour,
+    minute,
+    second,
+    millisecond,
+  );
+  let candidate = wallMs;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = wallClockFormatter(timeZone).formatToParts(
+      new Date(candidate),
+    );
+    const values = new Map(
+      parts
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, Number.parseInt(part.value, 10)]),
+    );
+    const formattedWallMs = Date.UTC(
+      values.get("year") ?? year,
+      (values.get("month") ?? month) - 1,
+      values.get("day") ?? dayOfMonth,
+      values.get("hour") ?? hour,
+      values.get("minute") ?? minute,
+      values.get("second") ?? second,
+      0,
+    );
+    const next = wallMs - (formattedWallMs - candidate);
+    if (next === candidate) return candidate;
+    candidate = next;
+  }
+  return candidate;
+}
+
+export function localDayStartMs(day: string, timeZone: string): number {
+  return localDateTimeMs(day, timeZone, 0, 0, 0, 0);
+}
+
+export function localDayEndMs(day: string, timeZone: string): number {
+  return localDayStartMs(civilDayAfter(day), timeZone) - 1;
+}
+
 export function assertValidWindow(input: {
   sinceDay: string;
   untilDay: string;

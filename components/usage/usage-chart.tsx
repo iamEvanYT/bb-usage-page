@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import type { DailyTotals, UsageChartMetric, UsageProviderKind } from "../../lib/types";
-import { PROVIDER_ORDER } from "../../lib/types";
+import type {
+  DailyTotals,
+  UsageChartMetric,
+  UsageProviderKind,
+} from "../../lib/types";
 import { formatDayShort, formatTokens, formatUsd } from "../../lib/format";
 import { PROVIDER_COLOR, PROVIDER_LABEL, ProviderMark } from "./providers";
 
@@ -96,10 +99,14 @@ function valueFor(
   return metric === "tokens" ? entry.totalTokens : entry.costUsd;
 }
 
-export function UsageChartLegend() {
+export function UsageChartLegend({
+  providers,
+}: {
+  providers: readonly UsageProviderKind[];
+}) {
   return (
     <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-      {PROVIDER_ORDER.map((provider) => (
+      {providers.map((provider) => (
         <span key={provider} className="flex items-center gap-1.5">
           <ProviderMark provider={provider} className="size-3.5" />
           {PROVIDER_LABEL[provider]}
@@ -113,10 +120,12 @@ export function UsageProviderChart({
   days,
   daily,
   metric,
+  providers,
 }: {
   days: readonly string[];
   daily: readonly DailyTotals[];
   metric: UsageChartMetric;
+  providers: readonly UsageProviderKind[];
 }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
@@ -136,7 +145,7 @@ export function UsageProviderChart({
   const series = useMemo(() => {
     const columns = days.map((day) => {
       const entry = byDay.get(day);
-      const bands = PROVIDER_ORDER.map((provider) => ({
+      const bands = providers.map((provider) => ({
         provider,
         value: valueFor(entry, provider, metric),
       }));
@@ -154,7 +163,7 @@ export function UsageProviderChart({
       return Math.max(max, columnPeak);
     }, 0);
     const scale = niceScale(peak, 4);
-    const providerPaths = PROVIDER_ORDER.map((provider) => {
+    const providerPaths = providers.map((provider) => {
       const points = columns.map((column, index) => {
         const value =
           column.bands.find((band) => band.provider === provider)?.value ?? 0;
@@ -176,7 +185,7 @@ export function UsageProviderChart({
       return { provider, line, area, points };
     });
     return { columns, scale, providerPaths };
-  }, [byDay, days, metric, plotHeight, plotWidth]);
+  }, [byDay, days, metric, plotHeight, plotWidth, providers]);
 
   const labelIndexes =
     days.length <= 3
