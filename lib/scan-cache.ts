@@ -237,7 +237,11 @@ export function pruneScanCache(
 ): number {
   let removed = 0;
   for (const [path, entry] of cache) {
-    const agedOut = entry.mtimeMs < options.retentionCutoffMs;
+    // The walk includes restored files by ctime, and cached records can keep
+    // older files in the window. Do not evict files this scan still uses.
+    const agedOut =
+      !options.livePaths.has(path) &&
+      Math.max(entry.mtimeMs, entry.ctimeMs) < options.retentionCutoffMs;
     const underWalkedRoot = options.walkedRoots.some((root) =>
       pathUnderRoot(path, root),
     );

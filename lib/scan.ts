@@ -887,6 +887,18 @@ export class UsageScanner {
       return this.sliceFromBase(base, input, started, true);
     }
 
+    // Local transcript changes do not expire Cursor's independently fetched
+    // account usage. Reuse its priced buckets only for a covered window with
+    // unchanged rates/settings and a successful, unexpired fetch.
+    const cachedCursorSource =
+      !input.force &&
+      base &&
+      this.baseCovers(base, { ...cover, cursor: input.cursor }, ratesKey)
+        ? base.sources.find(
+            (source) => source.provider === "cursor" && source.status === "ok",
+          )
+        : undefined;
+
     const [claude, codex, pi, cursor] = await Promise.all([
       this.recordsForFiles(
         "claude",
@@ -909,12 +921,18 @@ export class UsageScanner {
         cover.untilDay,
         cover.timeZone,
       ),
-      this.recordsForCursor(
-        input.cursor,
-        cover.sinceDay,
-        cover.untilDay,
-        cover.timeZone,
-      ),
+      cachedCursorSource
+        ? Promise.resolve({
+            records: [],
+            source: cachedCursorSource,
+            fetchedAtMs: base!.cursorFetchedAtMs,
+          })
+        : this.recordsForCursor(
+            input.cursor,
+            cover.sinceDay,
+            cover.untilDay,
+            cover.timeZone,
+          ),
     ]);
 
     finalizeSource(claude.source, claudeDirs);
@@ -956,6 +974,16 @@ export class UsageScanner {
       this.rates,
       cover.timeZone,
     );
+    if (cachedCursorSource) {
+      buckets.push(
+        ...base!.buckets.filter(
+          (bucket) =>
+            bucket.provider === "cursor" &&
+            bucket.day >= cover.sinceDay &&
+            bucket.day <= cover.untilDay,
+        ),
+      );
+    }
 
     const pricing: UsageSummary["pricing"] = {
       status: this.ratesStatus,

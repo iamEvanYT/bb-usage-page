@@ -70,6 +70,10 @@ All durable state lives under `~/.bb/plugins/usage/`:
 | `usage-model-rates.json`| Cached LiteLLM pricing table                                     |
 
 Refresh / `--force` deletes the scan + base caches and re-reads transcripts.
+Normal scans retain restored transcripts selected by ctime or in-window usage.
+Local transcript changes reuse successful Cursor usage for up to 15 minutes,
+provided the requested window, time zone, auth path, and pricing still match.
+Refresh / `--force` also fetches Cursor usage again.
 
 ## Develop
 
