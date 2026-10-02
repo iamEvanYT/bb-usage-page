@@ -371,7 +371,7 @@ export function UsagePage() {
                 </div>
 
                 {breakdown === "model" ? (
-                  <table className="w-full text-sm">
+                  <table key="model" className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border text-left text-xs text-muted-foreground">
                         <th className="py-2 font-normal">Model</th>
@@ -420,7 +420,7 @@ export function UsagePage() {
                     </tbody>
                   </table>
                 ) : breakdown === "project" ? (
-                  <table className="w-full text-sm">
+                  <table key="project" className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border text-left text-xs text-muted-foreground">
                         <th className="py-2 font-normal">Project</th>
@@ -467,7 +467,7 @@ export function UsagePage() {
                     </tbody>
                   </table>
                 ) : (
-                  <table className="w-full text-sm">
+                  <table key="day" className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border text-left text-xs text-muted-foreground">
                         <th className="py-2 font-normal">Day</th>

@@ -189,7 +189,8 @@ export function applyProjectCatalog(
     const match =
       matchProjectCatalog(row.projectPath, catalog) ??
       matchProjectByFolder(folder, catalog);
-    const existing = merged.get(folder);
+    const key = match ? `project:${match.id}` : `folder:${folder}`;
+    const existing = merged.get(key);
     if (existing) {
       addProjectTotals(existing, row);
       if (match) {
@@ -198,7 +199,7 @@ export function applyProjectCatalog(
       }
       continue;
     }
-    merged.set(folder, {
+    merged.set(key, {
       project: match?.name ?? folder,
       projectPath: match ? (match.paths[0] ?? row.projectPath) : row.projectPath,
       threadId: null,
