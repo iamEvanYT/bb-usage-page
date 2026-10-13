@@ -12,6 +12,11 @@ import {
   makeWindow,
 } from "./format";
 import {
+  readOpenCodeRecords,
+  resolveOpenCodeDatabases,
+  type OpenCodeDatabase,
+} from "./opencode";
+import {
   extractCwdFromLine,
   fallbackProjectName,
   inferProjectPathFromTranscriptPath,
@@ -695,6 +700,55 @@ export class UsageScanner {
     };
   }
 
+  private async recordsForOpenCode(
+    databases: readonly OpenCodeDatabase[],
+    sinceMs: number,
+    sinceDay: string,
+    untilDay: string,
+    timeZone: string,
+  ): Promise<{ records: UsageRecord[]; source: UsageSource }> {
+    const records: UsageRecord[] = [];
+    const sessions = new Set<string>();
+    const messages: string[] = [];
+    let skippedFiles = 0;
+
+    for (const database of databases) {
+      const result = await readOpenCodeRecords(database.path, sinceMs);
+      if (!result.ok) {
+        skippedFiles += 1;
+        messages.push(result.message);
+        continue;
+      }
+      for (const record of result.records) {
+        if (isIgnoredUsageModel(record.model)) continue;
+        const day = dayInTimeZone(record.timestampMs, timeZone);
+        if (day < sinceDay || day > untilDay) continue;
+        records.push(record);
+        if (record.sessionId) sessions.add(record.sessionId);
+      }
+    }
+
+    return {
+      records,
+      source: {
+        provider: "opencode",
+        path: databases.map((database) => database.path).join(", ") || "(none)",
+        status:
+          databases.length === 0
+            ? "missing"
+            : skippedFiles === 0
+              ? "ok"
+              : skippedFiles === databases.length
+                ? "failed"
+                : "partial",
+        scannedFiles: databases.length - skippedFiles,
+        skippedFiles,
+        distinctSessions: sessions.size,
+        message: messages.length > 0 ? messages.join(" ") : null,
+      },
+    };
+  }
+
   private coveringWindow(input: ReadSummaryOptions): {
     sinceDay: string;
     untilDay: string;
@@ -730,6 +784,16 @@ export class UsageScanner {
           Date.now() - base.cursorFetchedAtMs < CURSOR_BASE_TTL_MS)) &&
       base.sinceDay <= input.sinceDay &&
       base.untilDay >= input.untilDay
+    );
+  }
+
+  /** A transient OpenCode read failure must not stick until its files change. */
+  private openCodeReadable(base: BaseScan): boolean {
+    const source = base.sources.find((entry) => entry.provider === "opencode");
+    return (
+      source !== undefined &&
+      source.status !== "failed" &&
+      source.status !== "partial"
     );
   }
 
@@ -827,6 +891,7 @@ export class UsageScanner {
       !input.force &&
       base &&
       this.baseCovers(base, input, ratesKey) &&
+      this.openCodeReadable(base) &&
       !stale
     ) {
       this.log(
@@ -836,11 +901,13 @@ export class UsageScanner {
     }
 
     const sinceMs = windowStartMs(cover.sinceDay);
-    const [claudeDirs, codexDirs, piDirs] = await Promise.all([
-      resolveClaudeDirs(),
-      resolveCodexDirs(),
-      resolvePiDirs(),
-    ]);
+    const [claudeDirs, codexDirs, piDirs, openCodeDatabases] =
+      await Promise.all([
+        resolveClaudeDirs(),
+        resolveCodexDirs(),
+        resolvePiDirs(),
+        resolveOpenCodeDatabases(),
+      ]);
 
     const [claudeFiles, codexFiles, piFiles] = await Promise.all([
       this.collectFiles(
@@ -871,13 +938,18 @@ export class UsageScanner {
       ...codexFiles.files,
       ...piFiles.files,
     ];
-    const fingerprint = fingerprintFiles(allFiles);
+    // OpenCode keeps usage in SQLite; its db + WAL stats stand in for files.
+    const fingerprint = fingerprintFiles([
+      ...allFiles,
+      ...openCodeDatabases.flatMap((database) => database.stat),
+    ]);
 
     // Disk/memory base still valid — touch TTL, skip parse + re-aggregate.
     if (
       !input.force &&
       base &&
       this.baseCovers(base, input, ratesKey) &&
+      this.openCodeReadable(base) &&
       base.fingerprint === fingerprint
     ) {
       base.computedAtMs = Date.now();
@@ -899,7 +971,7 @@ export class UsageScanner {
           )
         : undefined;
 
-    const [claude, codex, pi, cursor] = await Promise.all([
+    const [claude, codex, pi, cursor, openCode] = await Promise.all([
       this.recordsForFiles(
         "claude",
         claudeFiles.files,
@@ -933,6 +1005,13 @@ export class UsageScanner {
             cover.untilDay,
             cover.timeZone,
           ),
+      this.recordsForOpenCode(
+        openCodeDatabases,
+        sinceMs,
+        cover.sinceDay,
+        cover.untilDay,
+        cover.timeZone,
+      ),
     ]);
 
     finalizeSource(claude.source, claudeDirs);
@@ -968,6 +1047,7 @@ export class UsageScanner {
       ...codex.records,
       ...pi.records,
       ...cursor.records,
+      ...openCode.records,
     ]);
     const { buckets, sessionsByDay } = aggregateBuckets(
       allRecords,
@@ -1003,7 +1083,13 @@ export class UsageScanner {
       ratesKey,
       computedAtMs: Date.now(),
       buckets,
-      sources: [claude.source, codex.source, pi.source, cursor.source],
+      sources: [
+        claude.source,
+        codex.source,
+        pi.source,
+        cursor.source,
+        openCode.source,
+      ],
       pricing,
       sessionsByDay,
       cursorEnabled: input.cursor?.enabled === true,
@@ -1232,6 +1318,7 @@ export function mergeSummary(summary: UsageSummary): MergedUsage {
         codex: emptyProvider(),
         pi: emptyProvider(),
         cursor: emptyProvider(),
+        opencode: emptyProvider(),
       },
     };
     day.costUsd += bucket.costUsd;

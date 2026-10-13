@@ -15,7 +15,7 @@ interface ProjectCatalogEntry {
   paths: readonly string[];
 }
 
-function normalizeProjectPath(path: string): string {
+export function normalizeProjectPath(path: string): string {
   const trimmed = path.trim();
   if (trimmed.length === 0) return "";
   const expanded =

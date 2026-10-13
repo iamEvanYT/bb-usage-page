@@ -21,9 +21,9 @@ export const USAGE_SCAN_CACHE_VERSION = 6 as const;
 
 /**
  * v4: homogeneous pricing-source buckets; v5: include projectPath;
- * v6: Cursor; v7: Cursor auth path.
+ * v6: Cursor; v7: Cursor auth path; v8: OpenCode.
  */
-export const USAGE_BASE_CACHE_VERSION = 7 as const;
+export const USAGE_BASE_CACHE_VERSION = 8 as const;
 
 export interface CachedFile {
   size: number;
@@ -143,7 +143,8 @@ export function decodeScanCache(document: unknown): ScanCache {
       entry.p !== "claude" &&
       entry.p !== "codex" &&
       entry.p !== "pi" &&
-      entry.p !== "cursor"
+      entry.p !== "cursor" &&
+      entry.p !== "opencode"
     ) {
       continue;
     }
@@ -429,7 +430,8 @@ function isProvider(value: unknown): value is UsageProviderKind {
     value === "claude" ||
     value === "codex" ||
     value === "pi" ||
-    value === "cursor"
+    value === "cursor" ||
+    value === "opencode"
   );
 }
 

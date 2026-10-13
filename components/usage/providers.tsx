@@ -5,6 +5,7 @@ export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   codex: "Codex",
   pi: "Pi",
   cursor: "Cursor",
+  opencode: "OpenCode",
 };
 
 export const PROVIDER_COLOR: Record<UsageProviderKind, string> = {
@@ -12,6 +13,7 @@ export const PROVIDER_COLOR: Record<UsageProviderKind, string> = {
   codex: "var(--usage-codex, #e6e6e6)",
   pi: "var(--usage-pi, #6ee7b7)",
   cursor: "var(--usage-cursor, #8b5cf6)",
+  opencode: "var(--usage-opencode, #64748b)",
 };
 
 export function ProviderMark({
@@ -65,6 +67,30 @@ export function ProviderMark({
         style={{ color: PROVIDER_COLOR.cursor }}
       >
         <path d="M457.43,125.94L244.42,2.96c-6.84-3.95-15.28-3.95-22.12,0L9.3,125.94c-5.75,3.32-9.3,9.46-9.3,16.11v247.99c0,6.65,3.55,12.79,9.3,16.11l213.01,122.98c6.84,3.95,15.28,3.95,22.12,0l213.01-122.98c5.75-3.32,9.3-9.46,9.3-16.11v-247.99c0-6.65-3.55-12.79-9.3-16.11h-.01ZM444.05,151.99l-205.63,356.16c-1.39,2.4-5.06,1.42-5.06-1.36v-233.21c0-4.66-2.49-8.97-6.53-11.31L24.87,145.67c-2.4-1.39-1.42-5.06,1.36-5.06h411.26c5.84,0,9.49,6.33,6.57,11.39h-.01Z" />
+      </svg>
+    );
+  }
+
+  if (provider === "opencode") {
+    return (
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="128 96 256 320"
+        className={className}
+        aria-hidden
+        fill="none"
+      >
+        <path
+          d="M320 224V352H192V224H320Z"
+          fill={PROVIDER_COLOR.opencode}
+          fillOpacity={0.4}
+        />
+        <path
+          fillRule="evenodd"
+          clipRule="evenodd"
+          d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z"
+          fill={PROVIDER_COLOR.opencode}
+        />
       </svg>
     );
   }

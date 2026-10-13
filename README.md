@@ -1,7 +1,7 @@
 # Usage
 
 A [bb](https://github.com/get-bb/bb) plugin that shows Claude Code, Codex, Pi,
-and Cursor usage and estimated API cost — inspired by
+Cursor, and OpenCode usage and estimated API cost — inspired by
 [t3code](https://github.com/pingdotgg/t3code)'s Usage page.
 
 Requires bb `>= 0.36`. Git installs need `npm` on PATH.
@@ -33,7 +33,7 @@ bb usage show [--days 7|30|90] [--force]
 ## Features
 
 - Sidebar **Usage** panel with 7 / 30 / 90 day windows
-- Provider split (Codex, Claude Code, Pi, Cursor), daily chart, and model /
+- Provider split (Codex, Claude Code, Pi, Cursor, OpenCode), daily chart, and model /
   project / day breakdown
 - Project rows map to bb projects when possible; personal `env_*` workspaces link to their thread; `~/Documents/Codex/*` chats merge into **Unassociated Codex chats**; unmatched folders stay as their own rows
 - Durable on-disk caches — only re-parse transcripts whose size/mtime changed
@@ -51,6 +51,7 @@ remote hosts.
 | Claude Code  | `~/.claude/projects/**/*.jsonl` (and `CLAUDE_CONFIG_DIR`) | Transcript `costUSD` or rates |
 | Pi           | `~/.bb/pi-bridge-sessions`, `~/.pi/agent/sessions`        | `message.usage.cost.total`    |
 | Cursor       | Cursor dashboard API using local desktop auth             | Cursor-reported cents         |
+| OpenCode     | `~/.local/share/opencode/opencode*.db` (or `XDG_DATA_HOME`) | Reported `cost`, else LiteLLM rates |
 
 Cursor support is opt-in under bb Settings → Plugins → Usage. It reads the
 Cursor desktop `state.vscdb` database in read-only mode and derives a
@@ -58,6 +59,11 @@ short-lived dashboard cookie in memory; the access token is not persisted by
 this plugin. Cursor usage is account-level, so it cannot be attributed to
 individual projects or sessions. The dashboard API is an undocumented web
 endpoint and may change independently of the plugin.
+
+OpenCode is read from its SQLite database in read-only mode (both the v1
+`message` and v2 `session_message` layouts; messages mirrored in both are
+counted once). Messages that log a cost of 0 — free or subscription-backed
+models — are priced from LiteLLM model rates instead.
 
 ## On-disk cache
 

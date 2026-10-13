@@ -29,7 +29,7 @@ test("pruning retains live/restored transcripts but removes deleted and expired 
 });
 
 test("local changes retain file caches and reuse Cursor until its own cache expires", async (t) => {
-  const home = await mkdtemp("/private/tmp/usage-scan-test-");
+  const home = await mkdtemp(path.join(os.tmpdir(), "usage-scan-test-"));
   t.after(async () => {
     t.mock.restoreAll();
     syncBuiltinESMExports();
@@ -134,5 +134,65 @@ test("local changes retain file caches and reuse Cursor until its own cache expi
   const recovered = await scanner.readSummary(input);
   assert.equal(cursorFetches, 8);
   assert.equal(recovered.merged.costUsd, 9);
+  await scanner.flush();
+});
+
+test("OpenCode v1 and v2 rows dedupe by message id and pick up new writes", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "usage-opencode-test-"));
+  const xdg = process.env.XDG_DATA_HOME;
+  delete process.env.XDG_DATA_HOME;
+  t.after(async () => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    if (xdg !== undefined) process.env.XDG_DATA_HOME = xdg;
+    await rm(home, { recursive: true, force: true });
+  });
+  t.mock.method(os, "homedir", () => home);
+  syncBuiltinESMExports();
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    "test-model": { input_cost_per_token: 0.01, output_cost_per_token: 0.02 },
+  }));
+
+  const dataDir = path.join(home, ".local", "share", "opencode");
+  await mkdir(dataDir, { recursive: true });
+  const database = new DatabaseSync(path.join(dataDir, "opencode.db"));
+  database.exec(`
+    CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+    CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT);
+    CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, time_created INTEGER, data TEXT);
+    INSERT INTO session VALUES ('ses_1', '/work/app');
+    INSERT INTO session_v2 VALUES ('ses_1', '/work/app');
+  `);
+  const v1 = (id: string, data: object) =>
+    database.prepare("INSERT INTO message VALUES (?, 'ses_1', ?, ?)").run(id, now, JSON.stringify({ role: "assistant", ...data }));
+  const v2 = (id: string, data: object) =>
+    database.prepare("INSERT INTO session_message VALUES (?, 'ses_1', 'assistant', ?, ?)").run(id, now, JSON.stringify(data));
+  const tokens = { input: 10, output: 5, reasoning: 2, cache: { read: 100, write: 0 } };
+  // Mirrored in both layouts: counted once.
+  v1("msg_a", { modelID: "test-model", cost: 1.5, tokens });
+  v2("msg_a", { model: { id: "test-model" }, cost: 1.5, tokens });
+  // v2 only, zero reported cost: priced from model rates (10 * 0.01 + 5 * 0.02).
+  v2("msg_b", { model: { id: "test-model" }, cost: 0, tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } } });
+  // No tokens: ignored.
+  v1("msg_c", { modelID: "test-model", cost: 0, tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } });
+
+  const scanner = new UsageScanner({ dataDir: path.join(home, "cache") });
+  const input = { ...makeWindow(30, new Date(now), "UTC"), cursor: { enabled: false } };
+  const first = await scanner.readSummary(input);
+  const opencode = first.merged.providers.find((row) => row.provider === "opencode");
+  assert.equal(opencode?.records, 2);
+  assert.ok(Math.abs((opencode?.costUsd ?? 0) - 1.7) < 1e-9);
+  assert.equal(first.merged.projects.find((row) => row.projectPath === "/work/app")?.records, 2);
+  assert.equal(first.merged.reasoningTokens, 2);
+  assert.equal(first.merged.sources.find((source) => source.provider === "opencode")?.status, "ok");
+
+  // A new write changes the db fingerprint, so the next walk re-reads it.
+  v2("msg_d", { model: { id: "test-model" }, cost: 1, tokens });
+  database.close();
+  const forced = await scanner.readSummary({ ...input, force: true });
+  assert.equal(forced.merged.providers.find((row) => row.provider === "opencode")?.records, 3);
   await scanner.flush();
 });
