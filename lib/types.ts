@@ -16,6 +16,7 @@ export interface UsageRecord {
   timestampMs: number;
   model: string;
   sessionId: string;
+  sessionTitle?: string;
   /** Normalized workspace cwd, or "" when unknown. */
   projectPath: string;
   totals: UsageTokenTotals;
@@ -28,6 +29,8 @@ export interface UsageBucket {
   provider: UsageProviderKind;
   model: string;
   projectPath: string;
+  sessionId: string;
+  sessionTitle: string;
   totals: UsageTokenTotals;
   costUsd: number;
   cacheSavingsUsd: number;
@@ -92,6 +95,18 @@ export interface ProjectTotals {
   costShare: number;
 }
 
+export interface ThreadTotals {
+  provider: UsageProviderKind;
+  sessionId: string;
+  threadId: string | null;
+  title: string;
+  projectPath: string;
+  costUsd: number;
+  totalTokens: number;
+  records: number;
+  costShare: number;
+}
+
 export interface DailyTotals {
   day: string;
   costUsd: number;
@@ -115,6 +130,7 @@ export interface MergedUsage {
   providers: ProviderTotals[];
   models: ModelTotals[];
   projects: ProjectTotals[];
+  threads: ThreadTotals[];
   daily: DailyTotals[];
   costQuality: {
     providerReportedShare: number;

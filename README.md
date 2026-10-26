@@ -34,7 +34,8 @@ bb usage show [--days 7|30|90] [--force]
 
 - Sidebar **Usage** panel with 7 / 30 / 90 day windows
 - Provider split (Codex, Claude Code, Pi, Cursor, OpenCode), daily chart, and model /
-  project / day breakdown
+  project / threads / day breakdown
+- Threads rank sessions by cost and link to matching bb threads, including archived threads. Other Claude sessions use their saved title when available, with session IDs as a fallback; Cursor remains an account-level row
 - Project rows map to bb projects when possible; personal `env_*` workspaces link to their thread; `~/Documents/Codex/*` chats merge into **Unassociated Codex chats**; unmatched folders stay as their own rows
 - Durable on-disk caches — only re-parse transcripts whose size/mtime changed
 - 7 / 30 / 90 day switches slice a warm 90-day base (no re-scan)

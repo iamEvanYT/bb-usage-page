@@ -12,6 +12,7 @@ import {
 } from "./lib/projects";
 import { mergedUsageSchema } from "./lib/rpc-schema";
 import { UsageScanner } from "./lib/scan";
+import { ThreadResolver } from "./lib/threads";
 import type { MergedUsage, ProjectTotals } from "./lib/types";
 
 const USAGE_COMMAND = "bb usage show [--days 7|30|90] [--force]";
@@ -43,6 +44,7 @@ export const rpcContract = defineRpcContract({
         sinceDay: daySchema,
         untilDay: daySchema,
         force: z.boolean().optional(),
+        includeThreads: z.boolean().optional(),
       })
       .strict()
       .refine((value) => value.sinceDay <= value.untilDay, {
@@ -208,6 +210,7 @@ export default async function plugin(bb: BbPluginApi) {
     dataDir: USAGE_DATA_DIR,
     log: (message) => bb.log.info(message),
   });
+  const threadResolver = new ThreadResolver();
 
   async function cursorOptions() {
     const values = await settings.get();
@@ -217,7 +220,7 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  async function resolveUsage(merged: MergedUsage): Promise<MergedUsage> {
+  async function resolveUsage(merged: MergedUsage, includeThreads = false): Promise<MergedUsage> {
     let catalog: ReturnType<typeof catalogFromBbProjects> = [];
     try {
       catalog = catalogFromBbProjects(
@@ -227,8 +230,18 @@ export default async function plugin(bb: BbPluginApi) {
       // Folder-name merge still runs without a live project list.
     }
     const projects = applyProjectCatalog(merged.projects, catalog);
+    let threads = merged.threads;
+    if (includeThreads) {
+      try {
+        threads = await threadResolver.resolve(bb, threads);
+      } catch (error) {
+        // Session IDs remain usable when the bb thread catalog is unavailable.
+        bb.log.warn(`Thread usage titles unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     return {
       ...merged,
+      threads,
       projects: finalizeProjectRows(
         await attachEnvironmentThreads(bb, projects),
         merged.costUsd,
@@ -237,7 +250,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(rpcContract, {
-    async getUsage({ sinceDay, untilDay, timeZone, force }) {
+    async getUsage({ sinceDay, untilDay, timeZone, force, includeThreads }) {
       const { merged } = await scanner.readSummary({
         sinceDay,
         untilDay,
@@ -245,7 +258,7 @@ export default async function plugin(bb: BbPluginApi) {
         force: force === true,
         cursor: await cursorOptions(),
       });
-      return resolveUsage(merged);
+      return resolveUsage(merged, includeThreads);
     },
   });
 

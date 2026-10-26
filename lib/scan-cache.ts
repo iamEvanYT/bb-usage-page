@@ -16,14 +16,15 @@ import type {
  * v5: Codex adjacent-only signature dedupe; Claude structured dedupe keys;
  *     reject malformed Codex cache splits.
  * v6: persist workspace cwd / projectPath on each record.
+ * v7: retain saved session titles.
  */
-export const USAGE_SCAN_CACHE_VERSION = 6 as const;
+export const USAGE_SCAN_CACHE_VERSION = 7 as const;
 
 /**
  * v4: homogeneous pricing-source buckets; v5: include projectPath;
- * v6: Cursor; v7: Cursor auth path; v8: OpenCode.
+ * v6: Cursor; v7: Cursor auth path; v8: OpenCode; v9: per-session buckets and titles.
  */
-export const USAGE_BASE_CACHE_VERSION = 8 as const;
+export const USAGE_BASE_CACHE_VERSION = 9 as const;
 
 export interface CachedFile {
   size: number;
@@ -47,6 +48,7 @@ type SerializedRecord = readonly [
   dedupeKey: string | null,
   reportedCostUsd: number | null,
   projectIndex: number,
+  sessionTitle: string,
 ];
 
 interface SerializedFile {
@@ -105,6 +107,7 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
         record.dedupeKey,
         record.reportedCostUsd,
         intern(paths, pathIndex, record.projectPath),
+        record.sessionTitle ?? "",
       ]),
     };
   }
@@ -154,7 +157,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     const records: UsageRecord[] = [];
     let corrupt = false;
     for (const row of entry.r) {
-      if (!Array.isArray(row) || row.length !== 11) {
+      if (!Array.isArray(row) || row.length !== 12) {
         corrupt = true;
         break;
       }
@@ -170,6 +173,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         dedupeKey,
         reportedCostUsd,
         projectIdx,
+        sessionTitle,
       ] = row as unknown as SerializedRecord;
       const model = typeof modelIdx === "number" ? models[modelIdx] : undefined;
       if (
@@ -178,6 +182,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         !Number.isInteger(modelIdx) ||
         !Number.isInteger(sessionIdx) ||
         !Number.isInteger(projectIdx) ||
+        typeof sessionTitle !== "string" ||
         !isNonNegativeFiniteNumber(uncached) ||
         !isNonNegativeFiniteNumber(cached) ||
         !isNonNegativeFiniteNumber(cacheCreation) ||
@@ -199,6 +204,7 @@ export function decodeScanCache(document: unknown): ScanCache {
           "",
         projectPath:
           (typeof projectIdx === "number" ? paths[projectIdx] : undefined) ?? "",
+        sessionTitle,
         totals: {
           uncachedInputTokens: uncached,
           cachedInputTokens: cached,
@@ -457,6 +463,8 @@ function isUsageBucket(value: unknown): value is UsageBucket {
     isProvider(bucket.provider) &&
     typeof bucket.model === "string" &&
     typeof bucket.projectPath === "string" &&
+    typeof bucket.sessionId === "string" &&
+    typeof bucket.sessionTitle === "string" &&
     isTokenTotals(bucket.totals) &&
     isNonNegativeFiniteNumber(bucket.costUsd) &&
     isNonNegativeFiniteNumber(bucket.cacheSavingsUsd) &&

@@ -10,6 +10,56 @@ import { LITELLM_RATES_URL } from "./pricing";
 import { UsageScanner } from "./scan";
 import { pruneScanCache, type ScanCache } from "./scan-cache";
 
+test("session costs stay separate within a project and survive cached window slices", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "usage-threads-test-"));
+  t.after(async () => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(home, { recursive: true, force: true });
+  });
+  t.mock.method(os, "homedir", () => home);
+  syncBuiltinESMExports();
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    "test-model": { input_cost_per_token: 0.01, output_cost_per_token: 0.02 },
+  }));
+  const now = new Date("2026-10-26T12:00:00Z");
+  const transcriptDir = path.join(home, ".claude", "projects", "test");
+  await mkdir(transcriptDir, { recursive: true });
+  for (const [id, sessionId, costUSD, timestamp] of [
+    ["a", "expensive", 5, "2026-10-25T12:00:00Z"],
+    ["b", "cheap", 1, now.toISOString()],
+    ["c", "expensive", 3, now.toISOString()],
+  ] as const) {
+    await appendFile(path.join(transcriptDir, "test.jsonl"), JSON.stringify({
+      type: "assistant", timestamp, sessionId, costUSD, cwd: "/work/project",
+      message: { id, model: "test-model", usage: { input_tokens: 10, output_tokens: 2 } },
+    }) + "\n");
+  }
+  await appendFile(path.join(transcriptDir, "test.jsonl"), [
+    { type: "custom-title", sessionId: "expensive", customTitle: "Long running task" },
+    { type: "ai-title", sessionId: "expensive", aiTitle: "Automatic title" },
+    { type: "ai-title", sessionId: "cheap", aiTitle: "Quick task" },
+  ].map((meta) => JSON.stringify(meta)).join("\n") + "\n");
+  const dataDir = path.join(home, "cache");
+  const input = { ...makeWindow(7, now, "UTC"), cursor: { enabled: false } };
+  const scanner = new UsageScanner({ dataDir });
+  const first = await scanner.readSummary(input);
+  assert.deepEqual(first.merged.threads.map((r) => [r.sessionId, r.costUsd]), [["expensive", 8], ["cheap", 1]]);
+  assert.deepEqual(first.merged.threads.map((r) => r.title), ["Long running task", "Quick task"]);
+  assert.equal(first.merged.projects.length, 1);
+  assert.equal(first.merged.projects[0].costUsd, 9);
+  await scanner.flush();
+  const restarted = new UsageScanner({ dataDir });
+  const cached = await restarted.readSummary(input);
+  assert.deepEqual(cached.merged.threads, first.merged.threads);
+  assert.equal(cached.stats.filesParsed, 0);
+  const day = await restarted.readSummary({ ...input, sinceDay: "2026-10-26" });
+  assert.deepEqual(day.merged.threads.map((r) => [r.sessionId, r.costUsd]), [["expensive", 3], ["cheap", 1]]);
+  assert.equal(day.merged.costUsd, 4);
+  assert.equal(day.merged.threads[0].costShare, 0.75);
+  await restarted.flush();
+});
+
 test("pruning retains live/restored transcripts but removes deleted and expired files", () => {
   const entry = (mtimeMs: number, ctimeMs: number) => ({
     size: 1, mtimeMs, ctimeMs, provider: "codex" as const, records: [],

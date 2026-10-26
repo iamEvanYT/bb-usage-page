@@ -203,6 +203,7 @@ async function readTranscriptRecords(
   const sessionIdFallback = NodePath.basename(filePath, ".jsonl");
   let projectPath = inferProjectPathFromTranscriptPath(filePath);
   let sawTranscriptCwd = false;
+  const sessionTitles = new Map<string, { custom?: string; ai?: string }>();
 
   try {
     const lines = NodeReadline.createInterface({
@@ -211,6 +212,19 @@ async function readTranscriptRecords(
     });
 
     for await (const line of lines) {
+      if (provider === "claude" && (line.includes('"custom-title"') || line.includes('"ai-title"'))) {
+        try {
+          const meta = JSON.parse(line);
+          if (typeof meta.sessionId === "string") {
+            const titles = sessionTitles.get(meta.sessionId) ?? {};
+            if (meta.type === "custom-title" && typeof meta.customTitle === "string" && meta.customTitle.trim()) titles.custom = meta.customTitle.trim();
+            if (meta.type === "ai-title" && typeof meta.aiTitle === "string" && meta.aiTitle.trim()) titles.ai = meta.aiTitle.trim();
+            sessionTitles.set(meta.sessionId, titles);
+          }
+        } catch {
+          // A malformed metadata line must not discard usage from the file.
+        }
+      }
       if (!sawTranscriptCwd) {
         const cwd = extractCwdFromLine(line);
         if (cwd) {
@@ -235,7 +249,11 @@ async function readTranscriptRecords(
           : parsePiLine(line, sessionIdFallback);
       if (record) records.push(record);
     }
-    return records.map((record) => ({ ...record, projectPath }));
+    return records.map((record) => ({
+      ...record,
+      projectPath,
+      sessionTitle: sessionTitles.get(record.sessionId)?.custom || sessionTitles.get(record.sessionId)?.ai || "",
+    }));
   } catch {
     return null;
   }
@@ -1147,6 +1165,10 @@ function aggregateBuckets(
     }
   >();
   const sessionsByDay = new Map<string, Set<string>>();
+  const sessionTitles = new Map<string, string>();
+  for (const record of records) {
+    if (record.sessionTitle) sessionTitles.set(`${record.provider}\0${record.sessionId}`, record.sessionTitle);
+  }
 
   for (const record of records) {
     const day = dayInTimeZone(record.timestampMs, timeZone);
@@ -1171,7 +1193,8 @@ function aggregateBuckets(
       record.provider === "cursor"
         ? CURSOR_ACCOUNT_PROJECT_PATH
         : record.projectPath;
-    const key = `${day}\0${record.provider}\0${record.model}\0${projectPath}\0${priced.costSource}`;
+    const sessionId = record.provider === "cursor" ? "" : record.sessionId;
+    const key = `${day}\0${record.provider}\0${record.model}\0${projectPath}\0${priced.costSource}\0${sessionId}`;
     let entry = map.get(key);
     if (!entry) {
       entry = {
@@ -1180,6 +1203,8 @@ function aggregateBuckets(
           provider: record.provider,
           model: record.model,
           projectPath,
+          sessionId,
+          sessionTitle: sessionTitles.get(`${record.provider}\0${sessionId}`) ?? "",
           totals: { ...EMPTY_TOTALS },
           costUsd: 0,
           cacheSavingsUsd: 0,
@@ -1251,6 +1276,7 @@ export function mergeSummary(summary: UsageSummary): MergedUsage {
     string,
     { costUsd: number; totalTokens: number; records: number }
   >();
+  const threadAccumulator = new Map<string, MergedUsage["threads"][number]>();
   const dailyAccumulator = new Map<
     string,
     {
@@ -1309,6 +1335,25 @@ export function mergeSummary(summary: UsageSummary): MergedUsage {
     project.totalTokens += tokens;
     project.records += bucket.records;
     projectAccumulator.set(bucket.projectPath, project);
+
+    const threadKey = `${bucket.provider}\0${bucket.sessionId}`;
+    const thread = threadAccumulator.get(threadKey) ?? {
+      provider: bucket.provider,
+      sessionId: bucket.sessionId,
+      threadId: null,
+      title: bucket.provider === "cursor"
+        ? "Cursor (account)"
+        : bucket.sessionTitle || bucket.sessionId || "Unattributed usage",
+      projectPath: bucket.projectPath,
+      costUsd: 0,
+      totalTokens: 0,
+      records: 0,
+      costShare: 0,
+    };
+    thread.costUsd += bucket.costUsd;
+    thread.totalTokens += tokens;
+    thread.records += bucket.records;
+    threadAccumulator.set(threadKey, thread);
 
     const day = dailyAccumulator.get(bucket.day) ?? {
       costUsd: 0,
@@ -1394,6 +1439,12 @@ export function mergeSummary(summary: UsageSummary): MergedUsage {
           b.totalTokens - a.totalTokens ||
           a.project.localeCompare(b.project),
       ),
+    threads: [...threadAccumulator.values()]
+      .map((thread) => ({
+        ...thread,
+        costShare: costUsd === 0 ? 0 : thread.costUsd / costUsd,
+      }))
+      .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens),
     daily: [...dailyAccumulator.entries()]
       .map(([day, totals]) => ({
         day,

@@ -32,10 +32,13 @@ export function UsagePage() {
   const rpc = useRpc<typeof rpcContract>();
   const [windowDays, setWindowDays] = useState<7 | 30 | 90>(30);
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
-  const [breakdown, setBreakdown] = useState<"model" | "project" | "day">(
+  const [breakdown, setBreakdown] = useState<"model" | "project" | "thread" | "day">(
     "model",
   );
   const [merged, setMerged] = useState<MergedUsage | null>(null);
+  const [threadsResolved, setThreadsResolved] = useState(false);
+  const includeThreads = breakdown === "thread";
+  const detailRows = includeThreads ? merged?.threads ?? [] : merged?.projects ?? [];
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [showSkeleton, setShowSkeleton] = useState(true);
@@ -72,6 +75,7 @@ export function UsagePage() {
     // it back so Strict Mode / rapid toggles still hard-refresh once.
     forceRefreshRef.current = false;
     if (hasLoadedRef.current) setRefreshing(true);
+    if (includeThreads) setThreadsResolved(false);
     setError(null);
     void rpc
       .call("getUsage", {
@@ -79,12 +83,14 @@ export function UsagePage() {
         sinceDay: window.sinceDay,
         untilDay: window.untilDay,
         force,
+        includeThreads,
       })
       .then((result) => {
         settled = true;
         if (!cancelled) {
           hasLoadedRef.current = true;
           setMerged(result);
+          setThreadsResolved(includeThreads);
           setRefreshing(false);
         }
       })
@@ -99,7 +105,7 @@ export function UsagePage() {
       cancelled = true;
       if (force && !settled) forceRefreshRef.current = true;
     };
-  }, [rpc, reloadKey, window.sinceDay, window.timeZone, window.untilDay, windowDays]);
+  }, [rpc, reloadKey, window.sinceDay, window.timeZone, window.untilDay, windowDays, includeThreads]);
 
   useEffect(() => {
     const nextMidnight = new Date();
@@ -352,11 +358,12 @@ export function UsagePage() {
                     Breakdown
                   </h2>
                   <div className="flex overflow-hidden rounded-md border border-border">
-                    {(["model", "project", "day"] as const).map((option) => (
+                    {(["model", "project", "thread", "day"] as const).map((option) => (
                       <button
                         key={option}
                         type="button"
                         onClick={() => setBreakdown(option)}
+                        aria-pressed={option === breakdown}
                         className={cn(
                           "cursor-pointer px-2.5 py-1 text-[10px] tracking-wide uppercase",
                           option === breakdown
@@ -364,7 +371,7 @@ export function UsagePage() {
                             : "text-muted-foreground hover:text-foreground",
                         )}
                       >
-                        {option}
+                        {option === "thread" ? "Threads" : option}
                       </button>
                     ))}
                   </div>
@@ -419,38 +426,43 @@ export function UsagePage() {
                       )}
                     </tbody>
                   </table>
-                ) : breakdown === "project" ? (
-                  <table key="project" className="w-full text-sm">
+                ) : breakdown === "project" || breakdown === "thread" ? (
+                  <table key={breakdown} className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border text-left text-xs text-muted-foreground">
-                        <th className="py-2 font-normal">Project</th>
+                        <th className="py-2 font-normal">{includeThreads ? "Thread" : "Project"}</th>
                         <th className="py-2 text-right font-normal">Cost</th>
                         <th className="py-2 text-right font-normal">Share</th>
                         <th className="py-2 text-right font-normal">Tokens</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {merged.projects.length === 0 ? (
+                      {(includeThreads && !threadsResolved) || detailRows.length === 0 ? (
                         <tr>
                           <td
                             colSpan={4}
                             className="py-6 text-center text-muted-foreground"
                           >
-                            No activity in this window.
+                            {includeThreads && !threadsResolved ? "Loading threads…" : "No activity in this window."}
                           </td>
                         </tr>
                       ) : (
-                        merged.projects.map((project) => (
+                        detailRows.map((project) => (
                           <tr
-                            key={`${project.projectPath}\0${project.project}`}
+                            key={"sessionId" in project
+                              ? `${project.provider}:${project.sessionId}`
+                              : `${project.projectPath}\0${project.project}`}
                             className="border-b border-border/50"
                           >
                             <td className="py-2 text-foreground">
-                              <ProjectLabel
-                                name={project.project}
-                                path={project.projectPath}
-                                threadId={project.threadId}
-                              />
+                              <span className="flex items-center gap-2">
+                                {"provider" in project ? <ProviderMark provider={project.provider} className="size-3.5 shrink-0" /> : null}
+                                <ProjectLabel
+                                  name={"title" in project ? project.title : project.project}
+                                  path={project.projectPath}
+                                  threadId={project.threadId}
+                                />
+                              </span>
                             </td>
                             <td className="py-2 text-right text-foreground tabular-nums">
                               {formatUsd(project.costUsd)}
