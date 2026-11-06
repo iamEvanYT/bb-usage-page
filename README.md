@@ -68,7 +68,9 @@ models — are priced from LiteLLM model rates instead.
 
 ## On-disk cache
 
-All durable state lives under `~/.bb/plugins/usage/`:
+All durable state lives in this plugin's bb storage directory,
+`<bb data dir>/plugins/usage-page/` (`~/.bb/plugins/usage-page/` for a default
+install):
 
 | File                    | Purpose                                                          |
 | ----------------------- | ---------------------------------------------------------------- |
