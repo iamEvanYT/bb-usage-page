@@ -1,8 +1,9 @@
+import * as NodePath from "node:path";
+
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
 
 import { isValidTimeZone, makeWindow } from "./lib/format";
-import { USAGE_DATA_DIR } from "./lib/plugin-data";
 import {
   applyEnvironmentThreads,
   applyProjectCatalog,
@@ -207,7 +208,8 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   const scanner = new UsageScanner({
-    dataDir: USAGE_DATA_DIR,
+    // bb.storage keeps this plugin's files in <bb data dir>/plugins/<plugin id>/.
+    dataDir: NodePath.dirname(bb.storage.database().name),
     log: (message) => bb.log.info(message),
   });
   const threadResolver = new ThreadResolver();
