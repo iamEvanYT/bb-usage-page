@@ -14,6 +14,10 @@ interface LiteLlmEntry {
   output_cost_per_token?: unknown;
   cache_read_input_token_cost?: unknown;
   cache_creation_input_token_cost?: unknown;
+  input_cost_per_token_priority?: unknown;
+  output_cost_per_token_priority?: unknown;
+  cache_read_input_token_cost_priority?: unknown;
+  cache_creation_input_token_cost_priority?: unknown;
 }
 
 function nonNegativeFiniteNumber(value: unknown): number | null {
@@ -47,6 +51,23 @@ export function isIgnoredUsageModel(model: string): boolean {
   return normalized === "synthetic" || normalized === "<synthetic>";
 }
 
+function modelRate(
+  inputCost: unknown,
+  outputCost: unknown,
+  cacheReadCost: unknown,
+  cacheCreationCost: unknown,
+): ModelRate | null {
+  const input = nonNegativeFiniteNumber(inputCost);
+  const output = nonNegativeFiniteNumber(outputCost);
+  if (input === null || output === null) return null;
+  return {
+    inputCostPerToken: input,
+    outputCostPerToken: output,
+    cacheReadCostPerToken: nonNegativeFiniteNumber(cacheReadCost) ?? input,
+    cacheCreationCostPerToken: nonNegativeFiniteNumber(cacheCreationCost) ?? input,
+  };
+}
+
 export function parseRateTable(document: unknown): RateTable {
   const table = new Map<string, ModelRate>();
   if (typeof document !== "object" || document === null) return table;
@@ -55,22 +76,24 @@ export function parseRateTable(document: unknown): RateTable {
   for (const [name, raw] of Object.entries(document as Record<string, unknown>)) {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as LiteLlmEntry;
-    const input = nonNegativeFiniteNumber(entry.input_cost_per_token);
-    const output = nonNegativeFiniteNumber(entry.output_cost_per_token);
-    if (input === null || output === null) continue;
     const normalizedName = fullModelName(name);
     if (normalizedName.length === 0) continue;
-    entries.push({
-      name: normalizedName,
-      rate: {
-        inputCostPerToken: input,
-        outputCostPerToken: output,
-        cacheReadCostPerToken:
-          nonNegativeFiniteNumber(entry.cache_read_input_token_cost) ?? input,
-        cacheCreationCostPerToken:
-          nonNegativeFiniteNumber(entry.cache_creation_input_token_cost) ?? input,
-      },
-    });
+    const standard = modelRate(
+      entry.input_cost_per_token,
+      entry.output_cost_per_token,
+      entry.cache_read_input_token_cost,
+      entry.cache_creation_input_token_cost,
+    );
+    if (!standard) continue;
+    entries.push({ name: normalizedName, rate: standard });
+    // OpenAI's priority tier, priced as a `<model>-priority` pseudo-model.
+    const priority = modelRate(
+      entry.input_cost_per_token_priority,
+      entry.output_cost_per_token_priority,
+      entry.cache_read_input_token_cost_priority,
+      entry.cache_creation_input_token_cost_priority,
+    );
+    if (priority) entries.push({ name: `${normalizedName}-priority`, rate: priority });
   }
 
   // Keep provider-qualified rates distinct. A suffix alias is only safe when

@@ -36,16 +36,18 @@ const EFFORT_SUFFIX_RE = /-(?:none|minimal|low|medium|high|xhigh|max)$/u;
 /**
  * Devin names models `<base>[-<effort>][-priority]` with dashed versions
  * (`gpt-5-5-high-priority`, `claude-5-fable-medium`). Map them onto the
- * LiteLLM names the other providers already price against.
+ * LiteLLM names the other providers already price against, keeping
+ * `-priority` so those requests get LiteLLM's priority-tier rates.
  */
 export function devinModelName(raw: string): string {
-  return raw
-    .trim()
-    .toLowerCase()
+  const name = raw.trim().toLowerCase();
+  const priority = name.endsWith("-priority");
+  const base = name
     .replace(/-priority$/u, "")
     .replace(EFFORT_SUFFIX_RE, "")
     .replace(/^gpt-(\d+)-(\d+)(?=$|-)/u, "gpt-$1.$2")
     .replace(/^claude-(\d+)-([a-z]+)(?=$|-)/u, "claude-$2-$1");
+  return priority ? `${base}-priority` : base;
 }
 
 interface DevinRow {

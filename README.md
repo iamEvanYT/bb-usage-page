@@ -93,8 +93,8 @@ models — are priced from LiteLLM model rates instead.
 Devin CLI sessions are read from `sessions.db` in read-only mode. Each
 assistant turn's token metrics are counted once per request id, so turns that
 compaction re-saves are not billed again. Devin model names drop their effort
-and `-priority` suffixes before pricing (`gpt-5-5-high-priority` is priced as
-`gpt-5.5`), so priority-tier surcharges are not included. Internal models such
+suffix before pricing and keep `-priority` (`gpt-5-5-high-priority` becomes
+`gpt-5.5-priority`), which is priced at LiteLLM's priority-tier rates. Internal models such
 as `swe-2` and `compactor` have no public rate and show as unpriced tokens.
 
 ## On-disk cache

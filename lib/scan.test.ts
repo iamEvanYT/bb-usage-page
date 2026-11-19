@@ -260,7 +260,10 @@ test("Devin sessions dedupe compacted copies, normalize models, and keep titles"
   t.mock.method(Date, "now", () => now);
   t.mock.method(globalThis, "fetch", async () => Response.json({
     "claude-opus-5-5": { input_cost_per_token: 0.01, output_cost_per_token: 0.02 },
-    "gpt-5.5": { input_cost_per_token: 0.001, output_cost_per_token: 0.002, cache_read_input_token_cost: 0.0001 },
+    "gpt-5.5": {
+      input_cost_per_token: 0.001, output_cost_per_token: 0.002, cache_read_input_token_cost: 0.0001,
+      input_cost_per_token_priority: 0.002, output_cost_per_token_priority: 0.004, cache_read_input_token_cost_priority: 0.0002,
+    },
   }));
 
   const dataDir = path.join(home, ".local", "share", "devin", "cli");
@@ -285,8 +288,10 @@ test("Devin sessions dedupe compacted copies, normalize models, and keep titles"
   node(assistant("req-a", "claude-opus-5-5-high", { input_tokens: 10, output_tokens: 5, cache_read_tokens: null }));
   // A compaction copy of the same request is not billed twice.
   node(assistant("req-a", "claude-opus-5-5-high", { input_tokens: 10, output_tokens: 5 }), seconds + 60);
-  // 100 * 0.001 + 1000 * 0.0001 + 10 * 0.002
+  // Priority tier: 100 * 0.002 + 1000 * 0.0002 + 10 * 0.004
   node(assistant("req-b", "gpt-5-5-xhigh-priority", { input_tokens: 100, output_tokens: 10, cache_read_tokens: 1000 }));
+  // 100 * 0.001 + 1000 * 0.0001 + 10 * 0.002
+  node(assistant("req-d", "gpt-5-5-high", { input_tokens: 100, output_tokens: 10, cache_read_tokens: 1000 }));
   node(assistant("req-c", "swe-2-medium", { input_tokens: 0, output_tokens: 0 }));
   database.close();
 
@@ -294,11 +299,11 @@ test("Devin sessions dedupe compacted copies, normalize models, and keep titles"
   const input = { ...makeWindow(30, new Date(now), "UTC"), cursor: { enabled: false } };
   const { merged } = await scanner.readSummary(input);
   const devin = merged.providers.find((row) => row.provider === "devin");
-  assert.equal(devin?.records, 2);
-  assert.ok(Math.abs((devin?.costUsd ?? 0) - 0.42) < 1e-9);
+  assert.equal(devin?.records, 3);
+  assert.ok(Math.abs((devin?.costUsd ?? 0) - 0.86) < 1e-9);
   assert.deepEqual(
     merged.models.filter((row) => row.provider === "devin").map((row) => row.model).sort(),
-    ["claude-opus-5-5", "gpt-5.5"],
+    ["claude-opus-5-5", "gpt-5.5", "gpt-5.5-priority"],
   );
   assert.deepEqual(
     merged.threads.filter((row) => row.provider === "devin").map((row) => [row.sessionId, row.title, row.projectPath]),
