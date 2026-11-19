@@ -24,7 +24,7 @@ export const USAGE_SCAN_CACHE_VERSION = 7 as const;
  * v4: homogeneous pricing-source buckets; v5: include projectPath;
  * v6: Cursor; v7: Cursor auth path; v8: OpenCode; v9: per-session buckets and titles.
  */
-export const USAGE_BASE_CACHE_VERSION = 9 as const;
+export const USAGE_BASE_CACHE_VERSION = 10 as const;
 
 export interface CachedFile {
   size: number;
@@ -437,7 +437,8 @@ function isProvider(value: unknown): value is UsageProviderKind {
     value === "codex" ||
     value === "pi" ||
     value === "cursor" ||
-    value === "opencode"
+    value === "opencode" ||
+    value === "devin"
   );
 }
 

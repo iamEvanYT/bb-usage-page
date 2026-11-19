@@ -2,16 +2,18 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { normalizeProjectPath } from "./projects";
+import {
+  readSqliteDatabase,
+  statSqliteDatabase,
+  tableNames,
+  type SqliteDatabase,
+} from "./sqlite";
 import { totalTokens, type UsageRecord, type UsageTokenTotals } from "./types";
 
 /** `opencode.db` plus channel builds such as `opencode-local.db`. */
 const DATABASE_NAME_RE = /^opencode(?:-[\w.-]+)?\.db$/u;
 
-export interface OpenCodeDatabase {
-  path: string;
-  /** Main database plus WAL — live writes land in the WAL first. */
-  stat: { path: string; size: number; mtimeMs: number; ctimeMs: number }[];
-}
+export type OpenCodeDatabase = SqliteDatabase;
 
 export function openCodeDataDirs(
   environment: NodeJS.ProcessEnv = process.env,
@@ -35,25 +37,8 @@ export async function resolveOpenCodeDatabases(
       continue;
     }
     for (const name of names.filter((n) => DATABASE_NAME_RE.test(n)).sort()) {
-      const path = NodePath.join(dir, name);
-      const stat: OpenCodeDatabase["stat"] = [];
-      for (const candidate of [path, `${path}-wal`]) {
-        try {
-          const stats = await NodeFSP.stat(candidate);
-          if (!stats.isFile()) continue;
-          stat.push({
-            path: candidate,
-            size: stats.size,
-            mtimeMs: stats.mtimeMs,
-            ctimeMs: stats.ctimeMs,
-          });
-        } catch {
-          // no WAL, or vanished
-        }
-      }
-      if (stat.length > 0 && stat[0].path === path) {
-        found.push({ path, stat });
-      }
+      const database = await statSqliteDatabase(NodePath.join(dir, name));
+      if (database) found.push(database);
     }
   }
   return found;
@@ -157,45 +142,22 @@ export async function readOpenCodeRecords(
   databasePath: string,
   sinceMs: number,
 ): Promise<OpenCodeReadResult> {
-  let DatabaseSync: typeof import("node:sqlite").DatabaseSync;
-  try {
-    // Keep node:sqlite out of the top-level module graph so older bb hosts
-    // keep serving the other providers.
-    ({ DatabaseSync } = await import("node:sqlite"));
-  } catch {
-    return { ok: false, message: "node:sqlite is unavailable on this host." };
-  }
-
-  try {
-    const database = new DatabaseSync(databasePath, { readOnly: true });
-    try {
-      database.exec("PRAGMA busy_timeout = 1000");
-      const tables = new Set(
-        (
-          database
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-            .all() as { name: string }[]
-        ).map((table) => table.name),
-      );
-      const records: UsageRecord[] = [];
-      const queries: string[] = [];
-      if (tables.has("message")) queries.push(v1Query(tables.has("session")));
-      if (tables.has("session_message")) {
-        queries.push(v2Query(tables.has("session_v2")));
-      }
-      for (const query of queries) {
-        const rows = database.prepare(query).all(sinceMs) as unknown as UsageRow[];
-        for (const row of rows) {
-          const record = openCodeRowToRecord(row);
-          if (record) records.push(record);
-        }
-      }
-      return { ok: true, records };
-    } finally {
-      database.close();
+  const result = await readSqliteDatabase(databasePath, "OpenCode", (database) => {
+    const tables = tableNames(database);
+    const records: UsageRecord[] = [];
+    const queries: string[] = [];
+    if (tables.has("message")) queries.push(v1Query(tables.has("session")));
+    if (tables.has("session_message")) {
+      queries.push(v2Query(tables.has("session_v2")));
     }
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { ok: false, message: `OpenCode database could not be read: ${detail}` };
-  }
+    for (const query of queries) {
+      const rows = database.prepare(query).all(sinceMs) as unknown as UsageRow[];
+      for (const row of rows) {
+        const record = openCodeRowToRecord(row);
+        if (record) records.push(record);
+      }
+    }
+    return records;
+  });
+  return result.ok ? { ok: true, records: result.value } : result;
 }

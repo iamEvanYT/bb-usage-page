@@ -1,4 +1,10 @@
-export type UsageProviderKind = "claude" | "codex" | "pi" | "cursor" | "opencode";
+export type UsageProviderKind =
+  | "claude"
+  | "codex"
+  | "pi"
+  | "cursor"
+  | "opencode"
+  | "devin";
 export const CURSOR_ACCOUNT_PROJECT_PATH = "\0cursor-account";
 export type UsageCostSource = "providerReported" | "modelPriced" | "unpriced";
 export type UsageChartMetric = "cost" | "tokens";
@@ -167,6 +173,7 @@ export const PROVIDER_ORDER: readonly UsageProviderKind[] = [
   "pi",
   "cursor",
   "opencode",
+  "devin",
 ];
 
 export function addTotals(

@@ -246,3 +246,64 @@ test("OpenCode v1 and v2 rows dedupe by message id and pick up new writes", asyn
   assert.equal(forced.merged.providers.find((row) => row.provider === "opencode")?.records, 3);
   await scanner.flush();
 });
+
+test("Devin sessions dedupe compacted copies, normalize models, and keep titles", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "usage-devin-test-"));
+  t.after(async () => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(home, { recursive: true, force: true });
+  });
+  t.mock.method(os, "homedir", () => home);
+  syncBuiltinESMExports();
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    "claude-opus-5-5": { input_cost_per_token: 0.01, output_cost_per_token: 0.02 },
+    "gpt-5.5": { input_cost_per_token: 0.001, output_cost_per_token: 0.002, cache_read_input_token_cost: 0.0001 },
+  }));
+
+  const dataDir = path.join(home, ".local", "share", "devin", "cli");
+  await mkdir(dataDir, { recursive: true });
+  const database = new DatabaseSync(path.join(dataDir, "sessions.db"));
+  database.exec(`
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, working_directory TEXT, title TEXT);
+    CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, chat_message TEXT, created_at INTEGER);
+    INSERT INTO sessions VALUES ('quiet-otter', '/work/app', 'Fix the flaky test');
+  `);
+  const seconds = Math.floor(now / 1000);
+  const node = (message: object, createdAt = seconds) =>
+    database.prepare("INSERT INTO message_nodes (session_id, chat_message, created_at) VALUES ('quiet-otter', ?, ?)")
+      .run(JSON.stringify(message), createdAt);
+  const assistant = (requestId: string, model: string, metrics: object) => ({
+    role: "assistant",
+    message_id: `msg-${requestId}`,
+    metadata: { request_id: requestId, generation_model: model, created_at: new Date(now).toISOString(), metrics },
+  });
+  node({ role: "user", content: "hi" });
+  // 10 * 0.01 + 5 * 0.02
+  node(assistant("req-a", "claude-opus-5-5-high", { input_tokens: 10, output_tokens: 5, cache_read_tokens: null }));
+  // A compaction copy of the same request is not billed twice.
+  node(assistant("req-a", "claude-opus-5-5-high", { input_tokens: 10, output_tokens: 5 }), seconds + 60);
+  // 100 * 0.001 + 1000 * 0.0001 + 10 * 0.002
+  node(assistant("req-b", "gpt-5-5-xhigh-priority", { input_tokens: 100, output_tokens: 10, cache_read_tokens: 1000 }));
+  node(assistant("req-c", "swe-2-medium", { input_tokens: 0, output_tokens: 0 }));
+  database.close();
+
+  const scanner = new UsageScanner({ dataDir: path.join(home, "cache") });
+  const input = { ...makeWindow(30, new Date(now), "UTC"), cursor: { enabled: false } };
+  const { merged } = await scanner.readSummary(input);
+  const devin = merged.providers.find((row) => row.provider === "devin");
+  assert.equal(devin?.records, 2);
+  assert.ok(Math.abs((devin?.costUsd ?? 0) - 0.42) < 1e-9);
+  assert.deepEqual(
+    merged.models.filter((row) => row.provider === "devin").map((row) => row.model).sort(),
+    ["claude-opus-5-5", "gpt-5.5"],
+  );
+  assert.deepEqual(
+    merged.threads.filter((row) => row.provider === "devin").map((row) => [row.sessionId, row.title, row.projectPath]),
+    [["quiet-otter", "Fix the flaky test", "/work/app"]],
+  );
+  assert.equal(merged.sources.find((source) => source.provider === "devin")?.status, "ok");
+  await scanner.flush();
+});

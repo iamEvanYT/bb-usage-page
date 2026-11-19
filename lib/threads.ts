@@ -10,6 +10,7 @@ const PROVIDERS: Record<string, UsageProviderKind> = {
   pi: "pi",
   opencode2: "opencode",
   opencode: "opencode",
+  devin: "devin",
 };
 
 export function applyThreadCatalog(

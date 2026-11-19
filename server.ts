@@ -266,7 +266,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.cli.register({
     name: "usage",
-    summary: "Show Claude / Codex / Pi / Cursor / OpenCode usage totals",
+    summary: "Show Claude / Codex / Pi / Cursor / OpenCode / Devin usage totals",
     commands: [
       {
         name: "show",

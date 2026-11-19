@@ -1,7 +1,7 @@
 # Usage
 
 A [bb](https://github.com/get-bb/bb) plugin that shows Claude Code, Codex, Pi,
-Cursor, and OpenCode usage and estimated API cost — inspired by
+Cursor, OpenCode, and Devin usage and estimated API cost — inspired by
 [t3code](https://github.com/pingdotgg/t3code)'s Usage page.
 
 Requires bb `>= 0.36`. Git installs need `npm` on PATH.
@@ -33,7 +33,7 @@ bb usage show [--days 7|30|90] [--force]
 ## Features
 
 - Sidebar **Usage** panel with 7 / 30 / 90 day windows
-- Provider split (Codex, Claude Code, Pi, Cursor, OpenCode), daily chart, and model /
+- Provider split (Codex, Claude Code, Pi, Cursor, OpenCode, Devin), daily chart, and model /
   project / threads / day breakdown
 - Threads rank sessions by cost and link to matching bb threads, including archived threads. Other Claude sessions use their saved title when available, with session IDs as a fallback; Cursor remains an account-level row
 - Project rows map to bb projects when possible; personal `env_*` workspaces link to their thread; `~/Documents/Codex/*` chats merge into **Unassociated Codex chats**; unmatched folders stay as their own rows
@@ -53,6 +53,7 @@ remote hosts.
 | Pi           | `~/.bb/pi-bridge-sessions`, `~/.pi/agent/sessions`        | `message.usage.cost.total`    |
 | Cursor       | Cursor dashboard API using local desktop auth             | Cursor-reported cents         |
 | OpenCode     | `~/.local/share/opencode/opencode*.db` (or `XDG_DATA_HOME`) | Reported `cost`, else LiteLLM rates |
+| Devin        | `~/.local/share/devin/cli/sessions.db` (`%APPDATA%\devin\cli` on Windows) | LiteLLM model rates |
 
 Cursor support is opt-in under bb Settings → Plugins → Usage. It reads the
 Cursor desktop `state.vscdb` database in read-only mode and derives a
@@ -65,6 +66,13 @@ OpenCode is read from its SQLite database in read-only mode (both the v1
 `message` and v2 `session_message` layouts; messages mirrored in both are
 counted once). Messages that log a cost of 0 — free or subscription-backed
 models — are priced from LiteLLM model rates instead.
+
+Devin CLI sessions are read from `sessions.db` in read-only mode. Each
+assistant turn's token metrics are counted once per request id, so turns that
+compaction re-saves are not billed again. Devin model names drop their effort
+and `-priority` suffixes before pricing (`gpt-5-5-high-priority` is priced as
+`gpt-5.5`), so priority-tier surcharges are not included. Internal models such
+as `swe-2` and `compactor` have no public rate and show as unpriced tokens.
 
 ## On-disk cache
 
