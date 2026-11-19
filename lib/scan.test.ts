@@ -338,3 +338,41 @@ test("disabled providers are not read and change the cached base", async (t) => 
   assert.equal(on.stats.summaryHit, false);
   await scanner.flush();
 });
+
+test("Claude scans only the configured directories", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "usage-claude-dirs-test-"));
+  t.after(async () => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(home, { recursive: true, force: true });
+  });
+  t.mock.method(os, "homedir", () => home);
+  syncBuiltinESMExports();
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    "test-model": { input_cost_per_token: 0.01, output_cost_per_token: 0.02 },
+  }));
+  const now = new Date();
+  const write = async (dir: string, id: string, costUSD: number) => {
+    const projects = path.join(home, dir, "projects", "test");
+    await mkdir(projects, { recursive: true });
+    await appendFile(path.join(projects, `${id}.jsonl`), JSON.stringify({
+      type: "assistant", timestamp: now.toISOString(), sessionId: id, costUSD,
+      message: { id, model: "test-model", usage: { input_tokens: 10, output_tokens: 2 } },
+    }) + "\n");
+  };
+  await write(".claude", "main", 1);
+  await write(".claude-work", "work", 2);
+  await write(".claude.backup", "backup", 4);
+
+  const scanner = new UsageScanner({ dataDir: path.join(home, "cache") });
+  const window = { ...makeWindow(7, now, "UTC"), cursor: { enabled: false }, providers: ["claude" as const] };
+  const defaults = await scanner.readSummary(window);
+  assert.equal(defaults.merged.costUsd, 1);
+  const both = await scanner.readSummary({ ...window, claudeDirs: ["~/.claude", "~/.claude-work"] });
+  assert.equal(both.merged.costUsd, 3);
+  assert.equal(both.stats.summaryHit, false);
+  // A projects folder can be given directly too.
+  const direct = await scanner.readSummary({ ...window, claudeDirs: [path.join(home, ".claude-work", "projects")] });
+  assert.equal(direct.merged.costUsd, 2);
+  await scanner.flush();
+});

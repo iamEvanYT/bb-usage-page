@@ -113,6 +113,8 @@ export interface ReadSummaryOptions {
    * Cursor stays governed by `cursor.enabled`.
    */
   providers?: readonly UsageProviderKind[];
+  /** Claude Code config directories (`~` allowed); defaults to `~/.claude`. */
+  claudeDirs?: readonly string[];
 }
 
 export interface CursorScanOptions {
@@ -124,12 +126,16 @@ function cursorDatabasePath(options: CursorScanOptions | undefined): string {
   return options?.databasePath?.trim() ?? "";
 }
 
-/** Stable identity of the local providers a scan reads. */
-function providersKey(input: ReadSummaryOptions): string {
+/** Stable identity of the local providers and directories a scan reads. */
+function sourcesKey(input: ReadSummaryOptions): string {
   const enabled = new Set(input.providers ?? PROVIDER_ORDER);
-  return PROVIDER_ORDER.filter(
+  const providers = PROVIDER_ORDER.filter(
     (provider) => provider !== "cursor" && enabled.has(provider),
   ).join(",");
+  const claude = enabled.has("claude")
+    ? claudeConfigDirs(input.claudeDirs).join("\0")
+    : "";
+  return `${providers}|${claude}`;
 }
 
 interface FileScanStats {
@@ -308,19 +314,25 @@ function windowStartMs(sinceDay: string): number {
   return Date.parse(`${sinceDay}T00:00:00Z`) - MTIME_SLACK_MS;
 }
 
-async function resolveClaudeDirs(): Promise<string[]> {
-  const dirs: string[] = [];
-  const configDir = process.env.CLAUDE_CONFIG_DIR?.trim();
-  const candidates = [
-    configDir ? NodePath.join(expandHome(configDir), "projects") : null,
-    NodePath.join(NodeOS.homedir(), ".claude", "projects"),
-    NodePath.join(NodeOS.homedir(), ".claude.backup", "projects"),
-  ];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    if (await pathExists(candidate)) dirs.push(candidate);
-  }
-  return [...new Set(dirs)];
+function claudeConfigDirs(dirs: readonly string[] | undefined): string[] {
+  const configured = dirs && dirs.length > 0 ? dirs : ["~/.claude"];
+  return [...new Set(configured.map((dir) => NodePath.resolve(expandHome(dir.trim()))))];
+}
+
+/** The `projects/` folder of a Claude config dir, or the dir itself if it is one. */
+async function claudeProjectsDir(configDir: string): Promise<string | null> {
+  const projects = NodePath.join(configDir, "projects");
+  if (await pathExists(projects)) return projects;
+  return NodePath.basename(configDir) === "projects" && (await pathExists(configDir))
+    ? configDir
+    : null;
+}
+
+async function resolveClaudeDirs(
+  dirs?: readonly string[],
+): Promise<string[]> {
+  const found = await Promise.all(claudeConfigDirs(dirs).map(claudeProjectsDir));
+  return [...new Set(found.filter((dir): dir is string => dir !== null))];
 }
 
 async function resolveCodexDirs(): Promise<string[]> {
@@ -346,12 +358,13 @@ async function resolvePiDirs(): Promise<string[]> {
 /** Where each provider's local data was found on this machine, if anywhere. */
 export async function detectProviderSources(options: {
   cursorDatabasePath?: string;
+  claudeDirs?: readonly string[];
 }): Promise<Record<UsageProviderKind, string[]>> {
   const cursorPath = expandHome(
     options.cursorDatabasePath?.trim() || defaultCursorDatabasePath(),
   );
   const [claude, codex, pi, opencode, devin, cursorFound] = await Promise.all([
-    resolveClaudeDirs(),
+    resolveClaudeDirs(options.claudeDirs),
     resolveCodexDirs(),
     resolvePiDirs(),
     resolveOpenCodeDatabases(),
@@ -366,6 +379,18 @@ export async function detectProviderSources(options: {
     opencode: opencode.map((database) => database.path),
     devin: devin.map((database) => database.path),
   };
+}
+
+/** Whether each configured Claude directory has a readable projects folder. */
+export async function claudeDirStatus(
+  dirs: readonly string[],
+): Promise<{ path: string; found: boolean }[]> {
+  return Promise.all(
+    dirs.map(async (path) => ({
+      path,
+      found: (await claudeProjectsDir(NodePath.resolve(expandHome(path.trim())))) !== null,
+    })),
+  );
 }
 
 type BaseScan = PersistedBaseScan;
@@ -838,7 +863,7 @@ export class UsageScanner {
       base.timeZone === input.timeZone &&
       base.ratesKey === ratesKey &&
       base.cursorEnabled === cursorEnabled &&
-      base.providersKey === providersKey(input) &&
+      base.sourcesKey === sourcesKey(input) &&
       (!cursorEnabled ||
         (cursorSource?.status === "ok" &&
           base.cursorDatabasePath === cursorDatabasePath(input.cursor) &&
@@ -970,7 +995,7 @@ export class UsageScanner {
       enabled.has(provider) ? resolve() : Promise.resolve([] as T[]);
     const [claudeDirs, codexDirs, piDirs, openCodeDatabases, devinDatabases] =
       await Promise.all([
-        when("claude", resolveClaudeDirs),
+        when("claude", () => resolveClaudeDirs(input.claudeDirs)),
         when("codex", resolveCodexDirs),
         when("pi", resolvePiDirs),
         when("opencode", () => resolveOpenCodeDatabases()),
@@ -1174,7 +1199,7 @@ export class UsageScanner {
       sessionsByDay,
       cursorEnabled: input.cursor?.enabled === true,
       cursorDatabasePath: cursorDatabasePath(input.cursor),
-      providersKey: providersKey(input),
+      sourcesKey: sourcesKey(input),
       cursorFetchedAtMs: cursor.fetchedAtMs,
       fileCount: allFiles.length,
       fileHits,

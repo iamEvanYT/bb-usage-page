@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { UsagePreferences } from "./preferences";
+import { MAX_CLAUDE_DIRS, type UsagePreferences } from "./preferences";
 import { PROVIDER_ORDER, type MergedUsage, type UsageProviderKind } from "./types";
 
 const providerKind = z.enum([
@@ -18,6 +18,7 @@ export const usagePreferencesSchema = z
       .array(z.object({ id: providerKind, enabled: z.boolean() }).strict())
       .max(PROVIDER_ORDER.length),
     cursorDatabasePath: z.string().max(4096),
+    claudeDirs: z.array(z.string().max(4096)).min(1).max(MAX_CLAUDE_DIRS),
   })
   .strict() satisfies z.ZodType<UsagePreferences>;
 
@@ -26,6 +27,8 @@ export const preferencesViewSchema = z
     preferences: usagePreferencesSchema,
     /** Display paths where each provider's local data was found. */
     detected: z.record(providerKind, z.array(z.string())),
+    /** Whether each configured Claude directory has a projects folder. */
+    claudeDirs: z.array(z.object({ path: z.string(), found: z.boolean() }).strict()),
   })
   .strict();
 

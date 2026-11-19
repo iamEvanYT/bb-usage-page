@@ -52,6 +52,13 @@ also moves with the arrow keys, Home, and End. The Usage page, chart, legend,
 and Day table follow that order. At least one provider has to stay on, and
 **Reset to defaults** restores the original order and switches.
 
+Claude Code has a **Directories** list under its row. It starts with
+`~/.claude`; add another config directory, such as the `CLAUDE_CONFIG_DIR`
+of a second account, and its `projects` folder is scanned too. A path that already
+ends in `projects` is read as is. Directories without a projects folder are
+flagged in the list. `CLAUDE_CONFIG_DIR` and `~/.claude.backup` are no longer
+scanned automatically, so add them here if you rely on them.
+
 Preferences are stored in the plugin's bb key-value storage. Earlier versions
 kept the Cursor switch and auth path in declarative plugin settings; bb hides
 those values once the descriptors are gone, so turn Cursor on again in the
@@ -65,7 +72,7 @@ remote hosts.
 | Provider     | Transcripts                                               | Cost                          |
 | ------------ | --------------------------------------------------------- | ----------------------------- |
 | Codex        | `~/.codex/sessions/**/*.jsonl` (or `CODEX_HOME`)          | LiteLLM model rates           |
-| Claude Code  | `~/.claude/projects/**/*.jsonl` (and `CLAUDE_CONFIG_DIR`) | Transcript `costUSD` or rates |
+| Claude Code  | `<dir>/projects/**/*.jsonl` for each configured directory (default `~/.claude`) | Transcript `costUSD` or rates |
 | Pi           | `~/.bb/pi-bridge-sessions`, `~/.pi/agent/sessions`        | `message.usage.cost.total`    |
 | Cursor       | Cursor dashboard API using local desktop auth             | Cursor-reported cents         |
 | OpenCode     | `~/.local/share/opencode/opencode*.db` (or `XDG_DATA_HOME`) | Reported `cost`, else LiteLLM rates |

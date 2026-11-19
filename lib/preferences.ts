@@ -13,6 +13,9 @@ export const DEFAULT_PROVIDER_ENABLED: Record<UsageProviderKind, boolean> = {
   devin: false,
 };
 
+export const DEFAULT_CLAUDE_DIRS: readonly string[] = ["~/.claude"];
+export const MAX_CLAUDE_DIRS = 16;
+
 export interface ProviderPreference {
   id: UsageProviderKind;
   enabled: boolean;
@@ -23,6 +26,8 @@ export interface UsagePreferences {
   providers: ProviderPreference[];
   /** Override for Cursor's state.vscdb; "" uses the platform default. */
   cursorDatabasePath: string;
+  /** Claude Code config directories; each one's `projects/` is scanned. */
+  claudeDirs: string[];
 }
 
 function isProviderKind(value: unknown): value is UsageProviderKind {
@@ -39,6 +44,7 @@ export function normalizePreferences(raw: unknown): UsagePreferences {
   const stored = (typeof raw === "object" && raw !== null ? raw : {}) as {
     providers?: unknown;
     cursorDatabasePath?: unknown;
+    claudeDirs?: unknown;
   };
   const providers: ProviderPreference[] = [];
   const seen = new Set<UsageProviderKind>();
@@ -56,7 +62,20 @@ export function normalizePreferences(raw: unknown): UsagePreferences {
   }
   const cursorDatabasePath =
     typeof stored.cursorDatabasePath === "string" ? stored.cursorDatabasePath.trim() : "";
-  return { providers, cursorDatabasePath };
+  return { providers, cursorDatabasePath, claudeDirs: normalizeClaudeDirs(stored.claudeDirs) };
+}
+
+/** Trimmed, unique, non-empty; falls back to the default when none remain. */
+export function normalizeClaudeDirs(raw: unknown): string[] {
+  const dirs = [
+    ...new Set(
+      (Array.isArray(raw) ? raw : [])
+        .filter((dir): dir is string => typeof dir === "string")
+        .map((dir) => dir.trim().replace(/(.)[\\/]+$/u, "$1"))
+        .filter(Boolean),
+    ),
+  ].slice(0, MAX_CLAUDE_DIRS);
+  return dirs.length > 0 ? dirs : [...DEFAULT_CLAUDE_DIRS];
 }
 
 export function enabledProviders(

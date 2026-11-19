@@ -12,6 +12,7 @@ test("preferences keep a full, ordered, deduplicated provider list", () => {
   assert.deepEqual(defaults.providers.map((p) => p.id), ["codex", "claude", "pi", "cursor", "opencode", "devin"]);
   assert.deepEqual(enabledProviders(defaults), ["codex", "claude", "pi"]);
   assert.equal(defaults.cursorDatabasePath, "");
+  assert.deepEqual(defaults.claudeDirs, ["~/.claude"]);
 
   const stored = normalizePreferences({
     providers: [
@@ -32,6 +33,15 @@ test("preferences keep a full, ordered, deduplicated provider list", () => {
     { id: "devin", enabled: false },
   ]);
   assert.equal(stored.cursorDatabasePath, "~/state.vscdb");
+  assert.deepEqual(stored.claudeDirs, ["~/.claude"]);
+});
+
+test("Claude directories are trimmed, unique, and never empty", () => {
+  assert.deepEqual(
+    normalizePreferences({ claudeDirs: [" ~/.claude ", "~/.claude-work/", "~/.claude", "", 4, "/"] }).claudeDirs,
+    ["~/.claude", "~/.claude-work", "/"],
+  );
+  assert.deepEqual(normalizePreferences({ claudeDirs: [] }).claudeDirs, ["~/.claude"]);
 });
 
 test("usage output keeps only enabled providers in the chosen order", () => {

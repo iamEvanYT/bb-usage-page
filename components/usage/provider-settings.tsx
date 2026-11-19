@@ -9,23 +9,35 @@ import {
   type ReactNode,
 } from "react";
 import { useRpc } from "@bb/plugin-sdk/app";
-import { AlertCircleIcon, DragDropVerticalIcon } from "@hugeicons/core-free-icons";
+import {
+  AlertCircleIcon,
+  Cancel01Icon,
+  DragDropVerticalIcon,
+  FolderIcon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { rpcContract } from "../../server";
-import type { ProviderPreference, UsagePreferences } from "../../lib/preferences";
+import {
+  MAX_CLAUDE_DIRS,
+  normalizeClaudeDirs,
+  type ProviderPreference,
+  type UsagePreferences,
+} from "../../lib/preferences";
 import type { UsageProviderKind } from "../../lib/types";
 import { cn } from "../../lib/utils";
+import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { PROVIDER_LABEL, ProviderMark } from "./providers";
 
 type Detected = Record<UsageProviderKind, string[]>;
+type DirStatus = ReadonlyMap<string, boolean>;
 
 const SETTLE_MS = 200;
 const SETTLE_EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const RUBBER_BAND = 0.2;
 
 const PROVIDER_HINT: Record<UsageProviderKind, string> = {
-  claude: "Transcripts in ~/.claude/projects",
+  claude: "Transcripts in each directory's projects folder",
   codex: "Sessions in ~/.codex/sessions",
   pi: "Sessions in ~/.pi and bb's Pi bridge",
   cursor: "Account usage from cursor.com",
@@ -38,6 +50,7 @@ export function ProviderSettings() {
   const [saved, setSaved] = useState<UsagePreferences | null>(null);
   const [draft, setDraft] = useState<UsagePreferences | null>(null);
   const [detected, setDetected] = useState<Detected | null>(null);
+  const [claudeStatus, setClaudeStatus] = useState<DirStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saveSeq = useRef(0);
 
@@ -47,6 +60,7 @@ export function ProviderSettings() {
       setSaved(view.preferences);
       setDraft((current) => current ?? view.preferences);
       setDetected(view.detected);
+      setClaudeStatus(new Map(view.claudeDirs.map((dir) => [dir.path, dir.found])));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -106,6 +120,7 @@ export function ProviderSettings() {
       <ProviderList
         preferences={draft}
         detected={detected}
+        claudeStatus={claudeStatus}
         onChange={save}
         onReset={reset}
       />
@@ -117,11 +132,13 @@ export function ProviderSettings() {
 function ProviderList({
   preferences,
   detected,
+  claudeStatus,
   onChange,
   onReset,
 }: {
   preferences: UsagePreferences;
   detected: Detected | null;
+  claudeStatus: DirStatus | null;
   onChange: (next: UsagePreferences, options?: { redetect?: boolean }) => void;
   onReset: () => void;
 }) {
@@ -325,7 +342,15 @@ function ProviderList({
             onHandleKeyDown={(event) => onHandleKeyDown(item.id, event)}
             onEnabledChange={(enabled) => setEnabled(item.id, enabled)}
           >
-            {item.id === "cursor" ? (
+            {item.id === "claude" ? (
+              <ClaudeDirOptions
+                dirs={preferences.claudeDirs}
+                status={claudeStatus}
+                onCommit={(claudeDirs) =>
+                  onChange({ ...preferences, claudeDirs }, { redetect: true })
+                }
+              />
+            ) : item.id === "cursor" ? (
               <CursorOptions
                 value={preferences.cursorDatabasePath}
                 onCommit={(cursorDatabasePath) =>
@@ -490,6 +515,120 @@ function Expand({ open, children }: { open: boolean; children: ReactNode }) {
   );
 }
 
+function ClaudeDirOptions({
+  dirs,
+  status,
+  onCommit,
+}: {
+  dirs: string[];
+  status: DirStatus | null;
+  onCommit: (dirs: string[]) => void;
+}) {
+  const [text, setText] = useState("");
+  const [problem, setProblem] = useState<string | null>(null);
+  const full = dirs.length >= MAX_CLAUDE_DIRS;
+
+  const add = () => {
+    const [dir] = normalizeClaudeDirs([text]);
+    if (!text.trim()) return;
+    if (dirs.includes(dir)) {
+      setProblem(`${dir} is already in the list.`);
+      return;
+    }
+    onCommit([...dirs, dir]);
+    setText("");
+    setProblem(null);
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-xs font-medium text-foreground">Directories</span>
+      <ul className="overflow-hidden rounded-md border border-border bg-background">
+        {dirs.map((dir, index) => {
+          const found = status?.get(dir);
+          return (
+            <li
+              key={dir}
+              className={cn(
+                "flex h-8 items-center gap-2 pr-1 pl-2.5",
+                index > 0 && "border-t border-border",
+              )}
+            >
+              <HugeiconsIcon
+                icon={FolderIcon}
+                className="size-3.5 shrink-0 text-muted-foreground"
+                aria-hidden
+              />
+              <span
+                className="min-w-0 flex-1 truncate font-mono text-xs text-foreground"
+                title={dir}
+              >
+                {dir}
+              </span>
+              {found === false ? (
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  No projects folder
+                </span>
+              ) : null}
+              <button
+                type="button"
+                aria-label={`Stop scanning ${dir}`}
+                title={dirs.length === 1 ? "Keep at least one directory" : undefined}
+                disabled={dirs.length === 1}
+                onClick={() => onCommit(dirs.filter((entry) => entry !== dir))}
+                className="flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 hover:bg-state-hover hover:text-foreground hover:duration-0 focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:pointer-events-none disabled:opacity-30"
+              >
+                <HugeiconsIcon icon={Cancel01Icon} className="size-3.5" aria-hidden />
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="flex gap-1.5">
+        <Input
+          value={text}
+          spellCheck={false}
+          disabled={full}
+          aria-label="Claude Code directory to add"
+          placeholder="Path to another Claude Code config directory (e.g. ~/.claude-personal)"
+          onChange={(event) => {
+            setText(event.target.value);
+            setProblem(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") add();
+            if (event.key === "Escape" && text) {
+              event.stopPropagation();
+              setText("");
+            }
+          }}
+          className="h-8 font-mono text-xs placeholder:font-sans placeholder:text-muted-foreground/60"
+        />
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={full || !text.trim()}
+          onClick={add}
+        >
+          Add
+        </Button>
+      </div>
+      {problem ? (
+        <span role="alert" className="text-xs text-destructive">
+          {problem}
+        </span>
+      ) : (
+        <span className="text-xs text-muted-foreground">
+          Add the config directory of each Claude Code account, such as the
+          CLAUDE_CONFIG_DIR of a second account. Usage is read from its
+          projects folder.
+        </span>
+      )}
+    </div>
+  );
+}
+
 function CursorOptions({
   value,
   onCommit,
@@ -516,7 +655,10 @@ function CursorOptions({
         onBlur={commit}
         onKeyDown={(event) => {
           if (event.key === "Enter") commit();
-          if (event.key === "Escape") setText(value);
+          if (event.key === "Escape" && text !== value) {
+            event.stopPropagation();
+            setText(value);
+          }
         }}
         className="h-8 font-mono text-xs"
       />

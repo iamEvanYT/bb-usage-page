@@ -24,7 +24,7 @@ export const USAGE_SCAN_CACHE_VERSION = 7 as const;
  * v4: homogeneous pricing-source buckets; v5: include projectPath;
  * v6: Cursor; v7: Cursor auth path; v8: OpenCode; v9: per-session buckets and titles.
  */
-export const USAGE_BASE_CACHE_VERSION = 11 as const;
+export const USAGE_BASE_CACHE_VERSION = 12 as const;
 
 export interface CachedFile {
   size: number;
@@ -301,7 +301,7 @@ export interface PersistedBaseScan {
   cursorEnabled: boolean;
   cursorDatabasePath: string;
   cursorFetchedAtMs: number | null;
-  providersKey: string;
+  sourcesKey: string;
   fileCount: number;
   fileHits: number;
   fileMisses: number;
@@ -323,7 +323,7 @@ interface SerializedBaseCache {
   cursorEnabled: boolean;
   cursorDatabasePath: string;
   cursorFetchedAtMs: number | null;
-  providersKey: string;
+  sourcesKey: string;
   fileCount: number;
   fileHits: number;
   fileMisses: number;
@@ -350,7 +350,7 @@ export function encodeBaseCache(base: PersistedBaseScan): SerializedBaseCache {
     cursorEnabled: base.cursorEnabled,
     cursorDatabasePath: base.cursorDatabasePath,
     cursorFetchedAtMs: base.cursorFetchedAtMs,
-    providersKey: base.providersKey,
+    sourcesKey: base.sourcesKey,
     fileCount: base.fileCount,
     fileHits: base.fileHits,
     fileMisses: base.fileMisses,
@@ -377,7 +377,7 @@ export function decodeBaseCache(document: unknown): PersistedBaseScan | null {
     root.sessionsByDay === null ||
     typeof root.cursorEnabled !== "boolean" ||
     typeof root.cursorDatabasePath !== "string" ||
-    typeof root.providersKey !== "string" ||
+    typeof root.sourcesKey !== "string" ||
     (root.cursorFetchedAtMs !== null &&
       !isNonNegativeFiniteNumber(root.cursorFetchedAtMs)) ||
     !isNonNegativeInteger(root.fileCount) ||
@@ -416,7 +416,7 @@ export function decodeBaseCache(document: unknown): PersistedBaseScan | null {
     cursorEnabled: root.cursorEnabled,
     cursorDatabasePath: root.cursorDatabasePath,
     cursorFetchedAtMs: root.cursorFetchedAtMs,
-    providersKey: root.providersKey,
+    sourcesKey: root.sourcesKey,
     fileCount: root.fileCount,
     fileHits: isNonNegativeInteger(root.fileHits) ? root.fileHits : 0,
     fileMisses: isNonNegativeInteger(root.fileMisses) ? root.fileMisses : 0,

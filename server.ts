@@ -25,7 +25,7 @@ import {
   preferencesViewSchema,
   usagePreferencesSchema,
 } from "./lib/rpc-schema";
-import { detectProviderSources, UsageScanner } from "./lib/scan";
+import { claudeDirStatus, detectProviderSources, UsageScanner } from "./lib/scan";
 import { ThreadResolver } from "./lib/threads";
 import type { MergedUsage, ProjectTotals, UsageProviderKind } from "./lib/types";
 
@@ -246,6 +246,7 @@ export default async function plugin(bb: BbPluginApi) {
     const providers = enabledProviders(current);
     return {
       providers,
+      claudeDirs: current.claudeDirs,
       cursor: {
         enabled: providers.includes("cursor"),
         databasePath: current.cursorDatabasePath || undefined,
@@ -301,11 +302,16 @@ export default async function plugin(bb: BbPluginApi) {
     },
     async getPreferences() {
       const current = await preferences();
-      const detected = await detectProviderSources({
-        cursorDatabasePath: current.cursorDatabasePath,
-      });
+      const [detected, claudeDirs] = await Promise.all([
+        detectProviderSources({
+          cursorDatabasePath: current.cursorDatabasePath,
+          claudeDirs: current.claudeDirs,
+        }),
+        claudeDirStatus(current.claudeDirs),
+      ]);
       return {
         preferences: current,
+        claudeDirs,
         detected: Object.fromEntries(
           Object.entries(detected).map(([provider, paths]) => [
             provider,
