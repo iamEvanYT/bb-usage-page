@@ -1,8 +1,33 @@
 import { z } from "zod";
 
-import type { MergedUsage } from "./types";
+import type { UsagePreferences } from "./preferences";
+import { PROVIDER_ORDER, type MergedUsage, type UsageProviderKind } from "./types";
 
-const providerKind = z.enum(["claude", "codex", "pi", "cursor", "opencode", "devin"]);
+const providerKind = z.enum([
+  "claude",
+  "codex",
+  "pi",
+  "cursor",
+  "opencode",
+  "devin",
+]) satisfies z.ZodType<UsageProviderKind>;
+
+export const usagePreferencesSchema = z
+  .object({
+    providers: z
+      .array(z.object({ id: providerKind, enabled: z.boolean() }).strict())
+      .max(PROVIDER_ORDER.length),
+    cursorDatabasePath: z.string().max(4096),
+  })
+  .strict() satisfies z.ZodType<UsagePreferences>;
+
+export const preferencesViewSchema = z
+  .object({
+    preferences: usagePreferencesSchema,
+    /** Display paths where each provider's local data was found. */
+    detected: z.record(providerKind, z.array(z.string())),
+  })
+  .strict();
 
 const providerAmount = z.object({
   costUsd: z.number(),

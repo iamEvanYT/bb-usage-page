@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useBbNavigate, useRpc } from "@bb/plugin-sdk/app";
+import { useBbNavigate, useRealtime, useRpc } from "@bb/plugin-sdk/app";
 import { ReloadIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { rpcContract } from "../../server";
-import type { MergedUsage, UsageChartMetric } from "../../lib/types";
-import { PROVIDER_ORDER } from "../../lib/types";
+import type {
+  MergedUsage,
+  UsageChartMetric,
+  UsageProviderKind,
+} from "../../lib/types";
+import {
+  DEFAULT_ENABLED_PROVIDERS,
+  PREFERENCES_CHANNEL,
+} from "../../lib/preferences";
 import {
   enumerateDays,
   formatCount,
@@ -46,6 +53,8 @@ export function UsagePage() {
   const [windowVersion, setWindowVersion] = useState(0);
   const hasLoadedRef = useRef(false);
   const forceRefreshRef = useRef(false);
+
+  useRealtime(PREFERENCES_CHANNEL, () => setReloadKey((value) => value + 1));
 
   const window = useMemo(() => makeWindow(windowDays), [windowDays, windowVersion]);
   const dataMatchesWindow =
@@ -122,36 +131,23 @@ export function UsagePage() {
     [merged],
   );
 
+  // The server returns only enabled providers, already in the user's order.
+  const providerKey = merged?.providers.map((row) => row.provider).join(",");
+  const visibleProviders = useMemo<UsageProviderKind[]>(
+    () =>
+      providerKey === undefined
+        ? DEFAULT_ENABLED_PROVIDERS
+        : (providerKey.split(",").filter(Boolean) as UsageProviderKind[]),
+    [providerKey],
+  );
   const cursorSource = merged?.sources.find(
     (source) => source.provider === "cursor",
   );
-  const cursorEnabled =
-    cursorSource !== undefined && cursorSource.path !== "(disabled)";
-  const visibleProviders = useMemo(
-    () =>
-      PROVIDER_ORDER.filter(
-        (provider) => provider !== "cursor" || cursorEnabled,
-      ),
-    [cursorEnabled],
-  );
   const cursorWarning =
-    cursorSource &&
-    cursorSource.path !== "(disabled)" &&
-    cursorSource.status !== "ok"
+    cursorSource && cursorSource.status !== "ok"
       ? cursorSource.message || `Cursor usage is ${cursorSource.status}.`
       : null;
-
-  const orderedProviders = useMemo(() => {
-    if (!merged) return [];
-    const visible = new Set(visibleProviders);
-    return [...merged.providers]
-      .sort((a, b) =>
-        metric === "cost"
-          ? b.costUsd - a.costUsd
-          : b.totalTokens - a.totalTokens,
-      )
-      .filter((provider) => visible.has(provider.provider));
-  }, [merged, metric, visibleProviders]);
+  const orderedProviders = merged?.providers ?? [];
 
   const recentDays = useMemo(
     () => (merged ? [...merged.daily].reverse().slice(0, 8) : []),
@@ -213,7 +209,7 @@ export function UsagePage() {
         </div>
 
         {showSkeleton ? (
-          <UsageSkeleton />
+          <UsageSkeleton providers={visibleProviders} />
         ) : error ? (
           <div className="rounded-md border border-destructive/40 px-4 py-3 text-sm text-destructive">
             Failed to load usage: {error}
@@ -617,7 +613,11 @@ function QualityRow({ label, value }: { label: string; value: string }) {
 
 const SKELETON_BAR_HEIGHTS = [34, 58, 41, 72, 22, 12, 49, 63, 80, 38, 55, 26, 44, 67];
 
-function UsageSkeleton() {
+function UsageSkeleton({
+  providers,
+}: {
+  providers: readonly UsageProviderKind[];
+}) {
   return (
     <>
       <section className="grid gap-6 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
@@ -629,7 +629,7 @@ function UsageSkeleton() {
             <div className="my-1.5 h-8 w-36 rounded-sm bg-muted" />
             <div className="h-3 w-28 rounded-sm bg-muted" />
           </div>
-          {PROVIDER_ORDER.map((provider) => (
+          {providers.map((provider) => (
             <div key={provider} className="flex flex-col gap-1.5">
               <div className="flex items-center justify-between">
                 <span className="flex items-center gap-2 text-sm text-foreground">

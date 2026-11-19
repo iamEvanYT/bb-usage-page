@@ -1,8 +1,18 @@
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
 
 import { isValidTimeZone, makeWindow } from "./lib/format";
 import { USAGE_DATA_DIR } from "./lib/plugin-data";
+import {
+  applyProviderPreferences,
+  enabledProviders,
+  normalizePreferences,
+  PREFERENCES_CHANNEL,
+  PREFERENCES_KEY,
+  type UsagePreferences,
+} from "./lib/preferences";
 import {
   applyEnvironmentThreads,
   applyProjectCatalog,
@@ -10,10 +20,21 @@ import {
   environmentIdFromProjectRow,
   finalizeProjectRows,
 } from "./lib/projects";
-import { mergedUsageSchema } from "./lib/rpc-schema";
-import { UsageScanner } from "./lib/scan";
+import {
+  mergedUsageSchema,
+  preferencesViewSchema,
+  usagePreferencesSchema,
+} from "./lib/rpc-schema";
+import { detectProviderSources, UsageScanner } from "./lib/scan";
 import { ThreadResolver } from "./lib/threads";
-import type { MergedUsage, ProjectTotals } from "./lib/types";
+import type { MergedUsage, ProjectTotals, UsageProviderKind } from "./lib/types";
+
+function displayPath(path: string): string {
+  const home = NodeOS.homedir();
+  return path === home || path.startsWith(`${home}${NodePath.sep}`)
+    ? `~${path.slice(home.length)}`
+    : path;
+}
 
 const USAGE_COMMAND = "bb usage show [--days 7|30|90] [--force]";
 
@@ -52,6 +73,18 @@ export const rpcContract = defineRpcContract({
         path: ["sinceDay"],
       }),
     output: mergedUsageSchema,
+  },
+  getPreferences: {
+    input: z.object({}).strict().optional(),
+    output: preferencesViewSchema,
+  },
+  setPreferences: {
+    input: usagePreferencesSchema,
+    output: usagePreferencesSchema,
+  },
+  resetPreferences: {
+    input: z.object({}).strict().optional(),
+    output: usagePreferencesSchema,
   },
 });
 
@@ -189,38 +222,43 @@ function isPreferredThread(
 }
 
 export default async function plugin(bb: BbPluginApi) {
-  const settings = bb.settings.define({
-    cursorEnabled: {
-      type: "boolean",
-      label: "Include Cursor usage",
-      description:
-        "Read Cursor's local auth read-only and include account-level usage from cursor.com. The token is held in memory only.",
-      default: false,
-    },
-    cursorDatabasePath: {
-      type: "string",
-      label: "Cursor auth database path",
-      description:
-        "Optional override for Cursor's state.vscdb path. Leave blank to use the platform default.",
-      default: "",
-    },
-  });
-
   const scanner = new UsageScanner({
     dataDir: USAGE_DATA_DIR,
     log: (message) => bb.log.info(message),
   });
   const threadResolver = new ThreadResolver();
 
-  async function cursorOptions() {
-    const values = await settings.get();
+  let preferencesCache: Promise<UsagePreferences> | null = null;
+
+  function preferences(): Promise<UsagePreferences> {
+    preferencesCache ??= bb.storage.kv
+      .get<unknown>(PREFERENCES_KEY)
+      .then(normalizePreferences)
+      .catch((error) => {
+        preferencesCache = null;
+        throw error;
+      });
+    return preferencesCache;
+  }
+
+  async function scanOptions() {
+    const current = await preferences();
+    const providers = enabledProviders(current);
     return {
-      enabled: values.cursorEnabled,
-      databasePath: values.cursorDatabasePath || undefined,
+      providers,
+      cursor: {
+        enabled: providers.includes("cursor"),
+        databasePath: current.cursorDatabasePath || undefined,
+      },
     };
   }
 
-  async function resolveUsage(merged: MergedUsage, includeThreads = false): Promise<MergedUsage> {
+  async function resolveUsage(
+    merged: MergedUsage,
+    providers: readonly UsageProviderKind[],
+    includeThreads = false,
+  ): Promise<MergedUsage> {
+    merged = applyProviderPreferences(merged, providers);
     let catalog: ReturnType<typeof catalogFromBbProjects> = [];
     try {
       catalog = catalogFromBbProjects(
@@ -251,14 +289,47 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     async getUsage({ sinceDay, untilDay, timeZone, force, includeThreads }) {
+      const options = await scanOptions();
       const { merged } = await scanner.readSummary({
         sinceDay,
         untilDay,
         timeZone,
         force: force === true,
-        cursor: await cursorOptions(),
+        ...options,
       });
-      return resolveUsage(merged, includeThreads);
+      return resolveUsage(merged, options.providers, includeThreads);
+    },
+    async getPreferences() {
+      const current = await preferences();
+      const detected = await detectProviderSources({
+        cursorDatabasePath: current.cursorDatabasePath,
+      });
+      return {
+        preferences: current,
+        detected: Object.fromEntries(
+          Object.entries(detected).map(([provider, paths]) => [
+            provider,
+            paths.map(displayPath),
+          ]),
+        ) as typeof detected,
+      };
+    },
+    async setPreferences(input) {
+      const next = normalizePreferences(input);
+      if (enabledProviders(next).length === 0) {
+        throw new Error("Keep at least one provider enabled.");
+      }
+      await bb.storage.kv.set(PREFERENCES_KEY, next);
+      preferencesCache = Promise.resolve(next);
+      bb.realtime.publish(PREFERENCES_CHANNEL, null);
+      return next;
+    },
+    async resetPreferences() {
+      await bb.storage.kv.delete(PREFERENCES_KEY);
+      const next = normalizePreferences(null);
+      preferencesCache = Promise.resolve(next);
+      bb.realtime.publish(PREFERENCES_CHANNEL, null);
+      return next;
     },
   });
 
@@ -280,26 +351,20 @@ export default async function plugin(bb: BbPluginApi) {
         return { exitCode: 2, stderr: `${options.error}\n` };
       }
       const { sinceDay, untilDay, timeZone } = makeWindow(options.days);
+      const scan = await scanOptions();
       const { merged: scanned } = await scanner.readSummary({
         sinceDay,
         untilDay,
         timeZone,
         force: options.force,
-        cursor: await cursorOptions(),
+        ...scan,
       });
-      const merged = await resolveUsage(scanned);
+      const merged = await resolveUsage(scanned, scan.providers);
       const cursorSource = merged.sources.find(
         (source) => source.provider === "cursor",
       );
-      const visibleProviders = merged.providers.filter(
-        (provider) =>
-          provider.provider !== "cursor" ||
-          (cursorSource !== undefined && cursorSource.path !== "(disabled)"),
-      );
       const cursorWarning =
-        cursorSource &&
-        cursorSource.path !== "(disabled)" &&
-        cursorSource.status !== "ok"
+        cursorSource && cursorSource.status !== "ok"
           ? `Warning: Cursor usage is ${cursorSource.status}: ${
               cursorSource.message || "source unavailable."
             }`
@@ -313,7 +378,7 @@ export default async function plugin(bb: BbPluginApi) {
         `Usage ${sinceDay} to ${untilDay}`,
         `Raw token cost: $${merged.costUsd.toFixed(2)}`,
         ...(cursorWarning ? [cursorWarning] : []),
-        ...visibleProviders.map(
+        ...merged.providers.map(
           (provider) =>
             `  ${provider.provider}: $${provider.costUsd.toFixed(2)} (${provider.totalTokens} tokens)`,
         ),

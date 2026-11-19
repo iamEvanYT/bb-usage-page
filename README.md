@@ -33,6 +33,8 @@ bb usage show [--days 7|30|90] [--force]
 ## Features
 
 - Sidebar **Usage** panel with 7 / 30 / 90 day windows
+- Turn providers on or off and drag them into the order you want under bb
+  Settings → Plugins → Usage → Providers. Disabled providers are not read at all
 - Provider split (Codex, Claude Code, Pi, Cursor, OpenCode, Devin), daily chart, and model /
   project / threads / day breakdown
 - Threads rank sessions by cost and link to matching bb threads, including archived threads. Other Claude sessions use their saved title when available, with session IDs as a fallback; Cursor remains an account-level row
@@ -40,6 +42,19 @@ bb usage show [--days 7|30|90] [--force]
 - Durable on-disk caches — only re-parse transcripts whose size/mtime changed
 - 7 / 30 / 90 day switches slice a warm 90-day base (no re-scan)
 - Cursor dashboard results are reused for 15 minutes and are invalidated when the auth database path changes
+
+## Settings
+
+bb Settings → Plugins → Usage → Providers lists every provider with the data
+it found on this machine. Each row has a switch and a drag handle; the handle
+also moves with the arrow keys, Home, and End. The Usage page, chart, legend,
+and Day table follow that order. At least one provider has to stay on, and
+**Reset to defaults** restores the original order and switches.
+
+Preferences are stored in the plugin's bb key-value storage. Earlier versions
+kept the Cursor switch and auth path in declarative plugin settings; bb hides
+those values once the descriptors are gone, so turn Cursor on again in the
+Providers list after upgrading.
 
 ## Data sources
 
@@ -55,7 +70,7 @@ remote hosts.
 | OpenCode     | `~/.local/share/opencode/opencode*.db` (or `XDG_DATA_HOME`) | Reported `cost`, else LiteLLM rates |
 | Devin        | `~/.local/share/devin/cli/sessions.db` (`%APPDATA%\devin\cli` on Windows) | LiteLLM model rates |
 
-Cursor support is opt-in under bb Settings → Plugins → Usage. It reads the
+Cursor support is opt-in; turn it on in the Providers list. It reads the
 Cursor desktop `state.vscdb` database in read-only mode and derives a
 short-lived dashboard cookie in memory; the access token is not persisted by
 this plugin. Cursor usage is account-level, so it cannot be attributed to

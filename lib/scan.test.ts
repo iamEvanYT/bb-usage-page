@@ -307,3 +307,34 @@ test("Devin sessions dedupe compacted copies, normalize models, and keep titles"
   assert.equal(merged.sources.find((source) => source.provider === "devin")?.status, "ok");
   await scanner.flush();
 });
+
+test("disabled providers are not read and change the cached base", async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "usage-providers-test-"));
+  t.after(async () => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(home, { recursive: true, force: true });
+  });
+  t.mock.method(os, "homedir", () => home);
+  syncBuiltinESMExports();
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    "test-model": { input_cost_per_token: 0.01, output_cost_per_token: 0.02 },
+  }));
+  const now = new Date();
+  const transcriptDir = path.join(home, ".claude", "projects", "test");
+  await mkdir(transcriptDir, { recursive: true });
+  await appendFile(path.join(transcriptDir, "test.jsonl"), JSON.stringify({
+    type: "assistant", timestamp: now.toISOString(), sessionId: "s", costUSD: 2,
+    message: { id: "a", model: "test-model", usage: { input_tokens: 10, output_tokens: 2 } },
+  }) + "\n");
+
+  const scanner = new UsageScanner({ dataDir: path.join(home, "cache") });
+  const window = { ...makeWindow(7, now, "UTC"), cursor: { enabled: false } };
+  const off = await scanner.readSummary({ ...window, providers: ["codex"] });
+  assert.equal(off.merged.costUsd, 0);
+  assert.equal(off.stats.filesParsed, 0);
+  const on = await scanner.readSummary({ ...window, providers: ["codex", "claude"] });
+  assert.equal(on.merged.costUsd, 2);
+  assert.equal(on.stats.summaryHit, false);
+  await scanner.flush();
+});

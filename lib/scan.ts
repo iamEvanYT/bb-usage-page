@@ -3,7 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
-import { readCursorAuth } from "./cursor-auth";
+import { defaultCursorDatabasePath, readCursorAuth } from "./cursor-auth";
 import { fetchCursorUsage } from "./cursor-api";
 import { readDevinRecords, resolveDevinDatabases } from "./devin";
 import {
@@ -108,6 +108,11 @@ export interface ReadSummaryOptions {
    */
   force?: boolean;
   cursor?: CursorScanOptions;
+  /**
+   * Transcript and database providers to read; omitted means all of them.
+   * Cursor stays governed by `cursor.enabled`.
+   */
+  providers?: readonly UsageProviderKind[];
 }
 
 export interface CursorScanOptions {
@@ -117,6 +122,14 @@ export interface CursorScanOptions {
 
 function cursorDatabasePath(options: CursorScanOptions | undefined): string {
   return options?.databasePath?.trim() ?? "";
+}
+
+/** Stable identity of the local providers a scan reads. */
+function providersKey(input: ReadSummaryOptions): string {
+  const enabled = new Set(input.providers ?? PROVIDER_ORDER);
+  return PROVIDER_ORDER.filter(
+    (provider) => provider !== "cursor" && enabled.has(provider),
+  ).join(",");
 }
 
 interface FileScanStats {
@@ -328,6 +341,31 @@ async function resolvePiDirs(): Promise<string[]> {
     if (await pathExists(dir)) existing.push(dir);
   }
   return existing;
+}
+
+/** Where each provider's local data was found on this machine, if anywhere. */
+export async function detectProviderSources(options: {
+  cursorDatabasePath?: string;
+}): Promise<Record<UsageProviderKind, string[]>> {
+  const cursorPath = expandHome(
+    options.cursorDatabasePath?.trim() || defaultCursorDatabasePath(),
+  );
+  const [claude, codex, pi, opencode, devin, cursorFound] = await Promise.all([
+    resolveClaudeDirs(),
+    resolveCodexDirs(),
+    resolvePiDirs(),
+    resolveOpenCodeDatabases(),
+    resolveDevinDatabases(),
+    pathExists(cursorPath),
+  ]);
+  return {
+    claude,
+    codex,
+    pi,
+    cursor: cursorFound ? [cursorPath] : [],
+    opencode: opencode.map((database) => database.path),
+    devin: devin.map((database) => database.path),
+  };
 }
 
 type BaseScan = PersistedBaseScan;
@@ -800,6 +838,7 @@ export class UsageScanner {
       base.timeZone === input.timeZone &&
       base.ratesKey === ratesKey &&
       base.cursorEnabled === cursorEnabled &&
+      base.providersKey === providersKey(input) &&
       (!cursorEnabled ||
         (cursorSource?.status === "ok" &&
           base.cursorDatabasePath === cursorDatabasePath(input.cursor) &&
@@ -926,13 +965,16 @@ export class UsageScanner {
     }
 
     const sinceMs = windowStartMs(cover.sinceDay);
+    const enabled = new Set(input.providers ?? PROVIDER_ORDER);
+    const when = <T,>(provider: UsageProviderKind, resolve: () => Promise<T[]>) =>
+      enabled.has(provider) ? resolve() : Promise.resolve([] as T[]);
     const [claudeDirs, codexDirs, piDirs, openCodeDatabases, devinDatabases] =
       await Promise.all([
-        resolveClaudeDirs(),
-        resolveCodexDirs(),
-        resolvePiDirs(),
-        resolveOpenCodeDatabases(),
-        resolveDevinDatabases(),
+        when("claude", resolveClaudeDirs),
+        when("codex", resolveCodexDirs),
+        when("pi", resolvePiDirs),
+        when("opencode", () => resolveOpenCodeDatabases()),
+        when("devin", () => resolveDevinDatabases()),
       ]);
 
     const [claudeFiles, codexFiles, piFiles] = await Promise.all([
@@ -1132,6 +1174,7 @@ export class UsageScanner {
       sessionsByDay,
       cursorEnabled: input.cursor?.enabled === true,
       cursorDatabasePath: cursorDatabasePath(input.cursor),
+      providersKey: providersKey(input),
       cursorFetchedAtMs: cursor.fetchedAtMs,
       fileCount: allFiles.length,
       fileHits,
