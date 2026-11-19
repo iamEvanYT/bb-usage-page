@@ -9,8 +9,8 @@ export const DEFAULT_PROVIDER_ENABLED: Record<UsageProviderKind, boolean> = {
   claude: true,
   pi: true,
   cursor: false,
-  opencode: true,
-  devin: true,
+  opencode: false,
+  devin: false,
 };
 
 export interface ProviderPreference {

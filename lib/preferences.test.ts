@@ -10,6 +10,7 @@ import { mergeSummary } from "./scan";
 test("preferences keep a full, ordered, deduplicated provider list", () => {
   const defaults = normalizePreferences(undefined);
   assert.deepEqual(defaults.providers.map((p) => p.id), ["codex", "claude", "pi", "cursor", "opencode", "devin"]);
+  assert.deepEqual(enabledProviders(defaults), ["codex", "claude", "pi"]);
   assert.equal(defaults.cursorDatabasePath, "");
 
   const stored = normalizePreferences({
@@ -27,8 +28,8 @@ test("preferences keep a full, ordered, deduplicated provider list", () => {
     { id: "claude", enabled: true },
     { id: "codex", enabled: true },
     { id: "cursor", enabled: false },
-    { id: "opencode", enabled: true },
-    { id: "devin", enabled: true },
+    { id: "opencode", enabled: false },
+    { id: "devin", enabled: false },
   ]);
   assert.equal(stored.cursorDatabasePath, "~/state.vscdb");
 });

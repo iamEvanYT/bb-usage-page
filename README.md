@@ -46,7 +46,8 @@ bb usage show [--days 7|30|90] [--force]
 ## Settings
 
 bb Settings → Plugins → Usage → Providers lists every provider with the data
-it found on this machine. Each row has a switch and a drag handle; the handle
+it found on this machine. Claude Code, Codex, and Pi are on by default; Cursor,
+OpenCode, and Devin start off. Each row has a switch and a drag handle; the handle
 also moves with the arrow keys, Home, and End. The Usage page, chart, legend,
 and Day table follow that order. At least one provider has to stay on, and
 **Reset to defaults** restores the original order and switches.
