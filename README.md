@@ -99,7 +99,8 @@ as `swe-2` and `compactor` have no public rate and show as unpriced tokens.
 
 ## On-disk cache
 
-All durable state lives under `~/.bb/plugins/usage/`:
+All durable state lives in this plugin's bb storage directory,
+`<bb data dir>/plugins/usage-page/` (`~/.bb/plugins/usage-page/` by default):
 
 | File                    | Purpose                                                          |
 | ----------------------- | ---------------------------------------------------------------- |

@@ -4,7 +4,6 @@ import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
 
 import { isValidTimeZone, makeWindow } from "./lib/format";
-import { USAGE_DATA_DIR } from "./lib/plugin-data";
 import {
   applyProviderPreferences,
   enabledProviders,
@@ -222,8 +221,12 @@ function isPreferredThread(
 }
 
 export default async function plugin(bb: BbPluginApi) {
+  // The SDK has no plugin-directory accessor, but bb keeps the plugin database
+  // at <bb data dir>/plugins/<plugin id>/data.db. Keeping the JSON caches next
+  // to it puts them in this plugin's own directory and respects a non-default
+  // bb data dir. Opening the database creates an empty data.db as a side effect.
   const scanner = new UsageScanner({
-    dataDir: USAGE_DATA_DIR,
+    dataDir: NodePath.dirname(bb.storage.database().name),
     log: (message) => bb.log.info(message),
   });
   const threadResolver = new ThreadResolver();
