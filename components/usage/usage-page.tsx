@@ -21,28 +21,40 @@ import {
   formatUsd,
   makeWindow,
 } from "../../lib/format";
+import { cn } from "../../lib/utils";
 import { MachineNotices, MachinePicker, useExcludedMachines } from "./machines";
 import { PROVIDER_COLOR, PROVIDER_LABEL, ProviderMark } from "./providers";
-import { UsageChartLegend, UsageProviderChart } from "./usage-chart";
+import { SegmentedControl, type SegmentedOption } from "./segmented-control";
+import { UsageChartLegend, UsageChartSkeleton, UsageProviderChart } from "./usage-chart";
 
-const WINDOW_OPTIONS = [
-  { days: 7 as const, label: "7 days" },
-  { days: 30 as const, label: "30 days" },
-  { days: 90 as const, label: "90 days" },
+type WindowDays = 7 | 30 | 90;
+type Breakdown = "model" | "project" | "thread" | "day";
+
+const WINDOW_OPTIONS: SegmentedOption<WindowDays>[] = ([7, 30, 90] as const).map((days) => ({
+  value: days,
+  label: `${days} days`,
+  compactLabel: `${days}d`,
+}));
+const METRIC_OPTIONS: SegmentedOption<UsageChartMetric>[] = [
+  { value: "cost", label: "Cost" },
+  { value: "tokens", label: "Tokens" },
 ];
+const BREAKDOWN_OPTIONS: SegmentedOption<Breakdown>[] = [
+  { value: "model", label: "Model" },
+  { value: "project", label: "Project" },
+  { value: "thread", label: "Threads" },
+  { value: "day", label: "Day" },
+];
+/** Columns that only fit beside the name on wider screens. */
+const WIDE_ONLY = "max-sm:hidden";
+const NUMBER_CELL = "py-2 pl-3 text-right whitespace-nowrap tabular-nums";
 const SKELETON_DELAY_MS = 30;
-
-function cn(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
-}
 
 export function UsagePage() {
   const rpc = useRpc<typeof rpcContract>();
-  const [windowDays, setWindowDays] = useState<7 | 30 | 90>(30);
+  const [windowDays, setWindowDays] = useState<WindowDays>(30);
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
-  const [breakdown, setBreakdown] = useState<"model" | "project" | "thread" | "day">(
-    "model",
-  );
+  const [breakdown, setBreakdown] = useState<Breakdown>("model");
   const [merged, setMerged] = useState<MergedUsage | null>(null);
   const [excludedMachines, setExcludedMachines] = useExcludedMachines();
   const [threadsResolved, setThreadsResolved] = useState(false);
@@ -179,14 +191,15 @@ export function UsagePage() {
 
   return (
     <div className="usage-page h-full min-h-0 overflow-auto bg-background text-foreground">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-6 py-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <p className="text-sm text-muted-foreground">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-5 sm:gap-8 sm:px-6 sm:py-6">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
+          <p className="mr-auto text-sm text-muted-foreground">
             {formatDayShort(window.sinceDay)} to {formatDayShort(window.untilDay)}
           </p>
-          <div className="flex items-center gap-2">
+          <div className="flex w-full items-center gap-2 sm:w-auto">
             {machines.length > 1 ? (
               <MachinePicker
+                className="min-w-0 flex-1 sm:flex-none"
                 machines={machines}
                 excluded={excludedMachines}
                 onChange={setExcludedMachines}
@@ -194,23 +207,13 @@ export function UsagePage() {
                 cursorIncluded={visibleProviders.includes("cursor")}
               />
             ) : null}
-            <div className="flex overflow-hidden rounded-md border border-border">
-              {WINDOW_OPTIONS.map((option) => (
-                <button
-                  key={option.days}
-                  type="button"
-                  onClick={() => setWindowDays(option.days)}
-                  className={cn(
-                    "cursor-pointer px-3 py-1.5 text-xs",
-                    option.days === windowDays
-                      ? "bg-muted text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              label="Time window"
+              options={WINDOW_OPTIONS}
+              value={windowDays}
+              onChange={setWindowDays}
+              stretchOnPhones={machines.length <= 1}
+            />
             <button
               type="button"
               onClick={() => {
@@ -220,7 +223,7 @@ export function UsagePage() {
               aria-label="Refresh usage"
               disabled={refreshing}
               className={cn(
-                "cursor-pointer rounded-md border border-border p-2 text-muted-foreground hover:text-foreground disabled:opacity-50",
+                "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border border-border text-muted-foreground hover:text-foreground disabled:opacity-50 max-md:pointer-coarse:size-10",
                 refreshing && "animate-spin",
               )}
             >
@@ -307,30 +310,21 @@ export function UsagePage() {
               </div>
 
               <div className="flex flex-col gap-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <h2 className="text-sm font-medium text-foreground">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  <h2 className="mr-auto text-sm font-medium text-foreground">
                     Daily {metric === "tokens" ? "processed tokens" : "cost"}
                   </h2>
-                  <div className="flex items-center gap-4">
-                    <div className="flex overflow-hidden rounded-md border border-border">
-                      {(["cost", "tokens"] as const).map((option) => (
-                        <button
-                          key={option}
-                          type="button"
-                          onClick={() => setMetric(option)}
-                          className={cn(
-                            "cursor-pointer px-2.5 py-1 text-[10px] tracking-wide uppercase",
-                            option === metric
-                              ? "bg-muted text-foreground"
-                              : "text-muted-foreground hover:text-foreground",
-                          )}
-                        >
-                          {option}
-                        </button>
-                      ))}
-                    </div>
-                    <UsageChartLegend providers={visibleProviders} />
-                  </div>
+                  <SegmentedControl
+                    label="Chart metric"
+                    size="sm"
+                    options={METRIC_OPTIONS}
+                    value={metric}
+                    onChange={setMetric}
+                  />
+                  <UsageChartLegend
+                    className="max-sm:order-last max-sm:w-full"
+                    providers={visibleProviders}
+                  />
                 </div>
                 <UsageProviderChart
                   days={days}
@@ -363,36 +357,26 @@ export function UsagePage() {
                 detail={`includes ${formatTokens(merged.reasoningTokens)} reasoning`}
               />
               <Metric
+                className="max-md:col-span-2"
                 label="Cache savings"
                 value={formatUsd(merged.costQuality.cacheSavingsUsd)}
                 detail="vs full (uncached) input rates"
               />
             </section>
 
-            <section className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_16rem]">
+            <section className="grid gap-6 sm:gap-8 lg:grid-cols-[minmax(0,1fr)_16rem]">
               <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <h2 className="text-sm font-medium text-foreground">
                     Breakdown
                   </h2>
-                  <div className="flex overflow-hidden rounded-md border border-border">
-                    {(["model", "project", "thread", "day"] as const).map((option) => (
-                      <button
-                        key={option}
-                        type="button"
-                        onClick={() => setBreakdown(option)}
-                        aria-pressed={option === breakdown}
-                        className={cn(
-                          "cursor-pointer px-2.5 py-1 text-[10px] tracking-wide uppercase",
-                          option === breakdown
-                            ? "bg-muted text-foreground"
-                            : "text-muted-foreground hover:text-foreground",
-                        )}
-                      >
-                        {option === "thread" ? "Threads" : option}
-                      </button>
-                    ))}
-                  </div>
+                  <SegmentedControl
+                    label="Breakdown"
+                    size="sm"
+                    options={BREAKDOWN_OPTIONS}
+                    value={breakdown}
+                    onChange={setBreakdown}
+                  />
                 </div>
 
                 {breakdown === "model" ? (
@@ -400,9 +384,9 @@ export function UsagePage() {
                     <thead>
                       <tr className="border-b border-border text-left text-xs text-muted-foreground">
                         <th className="py-2 font-normal">Model</th>
-                        <th className="py-2 text-right font-normal">Cost</th>
-                        <th className="py-2 text-right font-normal">Share</th>
-                        <th className="py-2 text-right font-normal">Tokens</th>
+                        <th className="py-2 pl-3 text-right font-normal">Cost</th>
+                        <th className={cn("py-2 pl-3 text-right font-normal", WIDE_ONLY)}>Share</th>
+                        <th className="py-2 pl-3 text-right font-normal">Tokens</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -425,18 +409,18 @@ export function UsagePage() {
                               <span className="flex items-center gap-2">
                                 <ProviderMark
                                   provider={model.provider}
-                                  className="size-3.5"
+                                  className="size-3.5 shrink-0"
                                 />
-                                {model.model}
+                                <span className="min-w-0 [overflow-wrap:anywhere]">{model.model}</span>
                               </span>
                             </td>
-                            <td className="py-2 text-right text-foreground tabular-nums">
+                            <td className={cn(NUMBER_CELL, "text-foreground")}>
                               {formatUsd(model.costUsd)}
                             </td>
-                            <td className="py-2 text-right text-muted-foreground tabular-nums">
+                            <td className={cn(NUMBER_CELL, "text-muted-foreground", WIDE_ONLY)}>
                               {formatPercent(model.costShare)}
                             </td>
-                            <td className="py-2 text-right text-muted-foreground tabular-nums">
+                            <td className={cn(NUMBER_CELL, "text-muted-foreground")}>
                               {formatTokens(model.totalTokens)}
                             </td>
                           </tr>
@@ -449,9 +433,9 @@ export function UsagePage() {
                     <thead>
                       <tr className="border-b border-border text-left text-xs text-muted-foreground">
                         <th className="py-2 font-normal">{includeThreads ? "Thread" : "Project"}</th>
-                        <th className="py-2 text-right font-normal">Cost</th>
-                        <th className="py-2 text-right font-normal">Share</th>
-                        <th className="py-2 text-right font-normal">Tokens</th>
+                        <th className="py-2 pl-3 text-right font-normal">Cost</th>
+                        <th className={cn("py-2 pl-3 text-right font-normal", WIDE_ONLY)}>Share</th>
+                        <th className="py-2 pl-3 text-right font-normal">Tokens</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -482,13 +466,13 @@ export function UsagePage() {
                                 />
                               </span>
                             </td>
-                            <td className="py-2 text-right text-foreground tabular-nums">
+                            <td className={cn(NUMBER_CELL, "text-foreground")}>
                               {formatUsd(project.costUsd)}
                             </td>
-                            <td className="py-2 text-right text-muted-foreground tabular-nums">
+                            <td className={cn(NUMBER_CELL, "text-muted-foreground", WIDE_ONLY)}>
                               {formatPercent(project.costShare)}
                             </td>
-                            <td className="py-2 text-right text-muted-foreground tabular-nums">
+                            <td className={cn(NUMBER_CELL, "text-muted-foreground")}>
                               {formatTokens(project.totalTokens)}
                             </td>
                           </tr>
@@ -502,12 +486,12 @@ export function UsagePage() {
                       <tr className="border-b border-border text-left text-xs text-muted-foreground">
                         <th className="py-2 font-normal">Day</th>
                         {visibleProviders.map((provider) => (
-                          <th key={provider} className="py-2 text-right font-normal">
+                          <th key={provider} className={cn("py-2 pl-3 text-right font-normal", WIDE_ONLY)}>
                             {PROVIDER_LABEL[provider]}
                           </th>
                         ))}
-                        <th className="py-2 text-right font-normal">Total</th>
-                        <th className="py-2 text-right font-normal">Tokens</th>
+                        <th className="py-2 pl-3 text-right font-normal">Total</th>
+                        <th className="py-2 pl-3 text-right font-normal">Tokens</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -529,15 +513,15 @@ export function UsagePage() {
                             {visibleProviders.map((provider) => (
                               <td
                                 key={provider}
-                                className="py-2 text-right text-muted-foreground tabular-nums"
+                                className={cn(NUMBER_CELL, "text-muted-foreground", WIDE_ONLY)}
                               >
                                 {formatUsd(day.byProvider[provider]?.costUsd ?? 0)}
                               </td>
                             ))}
-                            <td className="py-2 text-right text-foreground tabular-nums">
+                            <td className={cn(NUMBER_CELL, "text-foreground")}>
                               {formatUsd(day.costUsd)}
                             </td>
-                            <td className="py-2 text-right text-muted-foreground tabular-nums">
+                            <td className={cn(NUMBER_CELL, "text-muted-foreground")}>
                               {formatTokens(day.totalTokens)}
                             </td>
                           </tr>
@@ -592,14 +576,18 @@ function ProjectLabel({
 }) {
   const navigate = useBbNavigate();
   if (!threadId) {
-    return <span title={path || undefined}>{name}</span>;
+    return (
+      <span title={path || undefined} className="min-w-0 [overflow-wrap:anywhere]">
+        {name}
+      </span>
+    );
   }
   return (
     <button
       type="button"
       title={path || undefined}
       onClick={() => navigate.toThread(threadId)}
-      className="cursor-pointer text-left text-foreground underline decoration-dotted decoration-foreground/25 underline-offset-2"
+      className="min-w-0 cursor-pointer text-left text-foreground underline decoration-dotted decoration-foreground/25 underline-offset-2 [overflow-wrap:anywhere]"
     >
       {name}
     </button>
@@ -610,13 +598,15 @@ function Metric({
   label,
   value,
   detail,
+  className,
 }: {
   label: string;
   value: string;
   detail: string;
+  className?: string;
 }) {
   return (
-    <div className="flex flex-col gap-0.5 bg-background px-4 py-3">
+    <div className={cn("flex flex-col gap-0.5 bg-background px-4 py-3", className)}>
       <span className="text-xs text-muted-foreground">{label}</span>
       <span className="text-lg text-foreground tabular-nums">{value}</span>
       <span className="text-xs text-muted-foreground">{detail}</span>
@@ -632,8 +622,6 @@ function QualityRow({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-
-const SKELETON_BAR_HEIGHTS = [34, 58, 41, 72, 22, 12, 49, 63, 80, 38, 55, 26, 44, 67];
 
 function UsageSkeleton({
   providers,
@@ -667,20 +655,12 @@ function UsageSkeleton({
         </div>
         <div className="flex flex-col gap-3">
           <h2 className="py-1 text-sm font-medium text-foreground">Daily cost</h2>
-          <div className="flex h-56 items-end gap-1 pl-16">
-            {SKELETON_BAR_HEIGHTS.map((height) => (
-              <div
-                key={height}
-                className="flex-1 rounded-sm bg-muted"
-                style={{ height: `${height}%` }}
-              />
-            ))}
-          </div>
+          <UsageChartSkeleton />
         </div>
       </section>
       <section className="grid grid-cols-2 gap-px border-y border-border bg-border md:grid-cols-5">
         {Array.from({ length: 5 }, (_, index) => (
-          <div key={index} className="bg-background px-4 py-3">
+          <div key={index} className={cn("bg-background px-4 py-3", index === 4 && "max-md:col-span-2")}>
             <div className="mb-2 h-3 w-20 rounded-sm bg-muted" />
             <div className="mb-1 h-5 w-16 rounded-sm bg-muted" />
             <div className="h-3 w-28 rounded-sm bg-muted" />

@@ -17,6 +17,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { rpcContract } from "../../server";
+import type { DetectedSource, MergedSourceReport } from "../../lib/machines";
 import {
   MAX_CLAUDE_DIRS,
   normalizeClaudeDirs,
@@ -29,7 +30,9 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { PROVIDER_LABEL, ProviderMark } from "./providers";
 
-type Detected = Record<UsageProviderKind, string[]>;
+type Detected = MergedSourceReport["detected"];
+/** One line under a provider: a found location, or a hint when there is none. */
+type SourceLine = { machine: string | null; text: string };
 type DirStatus = ReadonlyMap<string, boolean>;
 /** Where local data was looked for: one machine, every machine, or only reachable ones. */
 type SearchScope = "single" | "all" | "reachable";
@@ -425,7 +428,7 @@ function ProviderRow({
   first: boolean;
   dragging: boolean;
   shifting: boolean;
-  detected: string[] | undefined;
+  detected: DetectedSource[] | undefined;
   notFound: string;
   lockOn: boolean;
   rowRef: (node: HTMLLIElement | null) => void;
@@ -439,12 +442,14 @@ function ProviderRow({
 }) {
   const label = PROVIDER_LABEL[item.id];
   const found = detected === undefined ? null : detected.length > 0;
-  const subtitle =
+  // One line per location, so every machine stays visible on narrow screens
+  // instead of being cut off inside one joined line.
+  const lines: SourceLine[] =
     detected === undefined
-      ? PROVIDER_HINT[item.id]
+      ? [{ machine: null, text: PROVIDER_HINT[item.id] }]
       : found
-        ? detected.join(" · ")
-        : `${notFound} · ${PROVIDER_HINT[item.id]}`;
+        ? detected.map((source) => ({ machine: source.machine, text: source.path }))
+        : [{ machine: null, text: `${notFound} · ${PROVIDER_HINT[item.id]}` }];
 
   return (
     <li
@@ -493,21 +498,30 @@ function ProviderRow({
           >
             {label}
           </span>
-          <span
-            className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
-            title={subtitle}
-          >
-            {found !== null ? (
-              <span
-                aria-hidden
-                className={cn(
-                  "size-1.5 shrink-0 rounded-full",
-                  found ? "bg-emerald-500" : "bg-muted-foreground/40",
-                )}
-              />
-            ) : null}
-            <span className="truncate">{subtitle}</span>
-          </span>
+          {lines.map((line) => (
+            <span
+              key={`${line.machine}\0${line.text}`}
+              className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+              title={line.machine ? `${line.machine}: ${line.text}` : line.text}
+            >
+              {found !== null ? (
+                <span
+                  aria-hidden
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    found ? "bg-emerald-500" : "bg-muted-foreground/40",
+                  )}
+                />
+              ) : null}
+              {line.machine ? (
+                // The name gives way first so more of the path stays readable.
+                <span className="max-w-[40%] shrink-0 truncate text-foreground/70">
+                  {line.machine}
+                </span>
+              ) : null}
+              <span className="min-w-0 truncate">{line.text}</span>
+            </span>
+          ))}
         </div>
         <Switch
           checked={item.enabled}

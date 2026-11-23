@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   npm package instead of vendored SDK declarations.
 - A session found on two machines (for example a synced transcript folder) is
   counted once.
+- The Usage page fits phone screens: header controls stay on one row with
+  short window labels, the machine picker opens as a bottom sheet, wide tables
+  drop secondary columns, and controls get larger touch targets.
+- The daily chart draws at its real width, so axis labels stay readable, and
+  a tap or drag shows that day's values on touch screens.
+- Settings → Providers lists each detected location on its own line, with
+  its machine name.
 
 ### Fixed
 

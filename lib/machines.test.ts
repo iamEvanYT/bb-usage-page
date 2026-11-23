@@ -97,8 +97,10 @@ test("source reports are labeled per machine and unreachable machines are flagge
     },
     { machine: { id: "nas", name: "NAS", local: false, connected: false }, report: null },
   ]);
-  assert.deepEqual(merged.detected.claude, ["Mac: ~/.claude/projects"]);
-  assert.deepEqual(merged.detected.devin, ["PC: ~\\AppData\\Roaming\\devin\\cli\\sessions.db"]);
+  assert.deepEqual(merged.detected.claude, [{ machine: "Mac", path: "~/.claude/projects" }]);
+  assert.deepEqual(merged.detected.devin, [
+    { machine: "PC", path: "~\\AppData\\Roaming\\devin\\cli\\sessions.db" },
+  ]);
   assert.deepEqual(merged.claudeDirs.map((dir) => dir.found), [true, true]);
   assert.deepEqual(merged.machines, [
     { name: "Mac", checked: true },

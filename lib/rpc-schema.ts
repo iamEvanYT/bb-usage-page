@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { MergedSourceReport } from "./machines";
 import { MAX_CLAUDE_DIRS, type UsagePreferences } from "./preferences";
 import {
   PROVIDER_ORDER,
@@ -31,14 +32,17 @@ export const usagePreferencesSchema = z
 export const preferencesViewSchema = z
   .object({
     preferences: usagePreferencesSchema,
-    /** Display paths where each provider's local data was found. */
-    detected: z.record(providerKind, z.array(z.string())),
+    /** Where each provider's data was found; `machine` is set when there are several. */
+    detected: z.record(
+      providerKind,
+      z.array(z.object({ machine: z.string().nullable(), path: z.string() }).strict()),
+    ),
     /** Whether each configured Claude directory has a projects folder on any machine. */
     claudeDirs: z.array(z.object({ path: z.string(), found: z.boolean() }).strict()),
     /** Machines whose local data was looked for; `checked` is false when unreachable. */
     machines: z.array(z.object({ name: z.string(), checked: z.boolean() }).strict()),
   })
-  .strict();
+  .strict() satisfies z.ZodType<{ preferences: UsagePreferences } & MergedSourceReport>;
 
 export const usageSourceSchema = z.object({
   provider: providerKind,

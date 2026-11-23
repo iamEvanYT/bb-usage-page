@@ -1,18 +1,84 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type RefObject,
+} from "react";
 import type {
   DailyTotals,
   UsageChartMetric,
   UsageProviderKind,
 } from "../../lib/types";
 import { formatDayShort, formatTokens, formatUsd } from "../../lib/format";
+import { cn } from "../../lib/utils";
 import { PROVIDER_COLOR, PROVIDER_LABEL, ProviderMark } from "./providers";
 
-const VIEW_WIDTH = 960;
-const VIEW_HEIGHT = 260;
-const PLOT_LEFT = 72;
-const PLOT_RIGHT = 16;
+/** Width assumed until the chart is measured. */
+const DEFAULT_WIDTH = 960;
+/** Charts narrower than this (phones) use the compact layout. */
+const COMPACT_WIDTH = 480;
+const PLOT_RIGHT = 8;
 const PLOT_TOP = 8;
-const PLOT_BOTTOM = 28;
+const PLOT_BOTTOM = 24;
+
+interface ChartLayout {
+  width: number;
+  height: number;
+  plotLeft: number;
+  plotWidth: number;
+  plotHeight: number;
+}
+
+/**
+ * Chart geometry in real pixels for a chart `width` pixels wide. Narrow charts
+ * are shorter, so the plot keeps a readable shape, and have a tighter axis
+ * gutter.
+ */
+function chartLayout(width: number): ChartLayout {
+  const compact = width < COMPACT_WIDTH;
+  const height = compact ? 180 : 224;
+  const plotLeft = compact ? 52 : 64;
+  return {
+    width,
+    height,
+    plotLeft,
+    plotWidth: width - plotLeft - PLOT_RIGHT,
+    plotHeight: height - PLOT_TOP - PLOT_BOTTOM,
+  };
+}
+
+/** X position of day `index` of `count`, centered when there is only one. */
+function xAt(layout: ChartLayout, index: number, count: number): number {
+  return count <= 1
+    ? layout.plotLeft + layout.plotWidth / 2
+    : layout.plotLeft + (index / (count - 1)) * layout.plotWidth;
+}
+
+/**
+ * Draw at the chart's real pixel width so axis labels stay at their CSS size
+ * instead of shrinking with a scaled-down viewBox on narrow screens.
+ */
+function useChartLayout(): [RefObject<HTMLDivElement | null>, ChartLayout] {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const update = () => {
+      const next = Math.round(element.getBoundingClientRect().width);
+      if (next > 0) setWidth(next);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const layout = useMemo(() => chartLayout(width), [width]);
+  return [ref, layout];
+}
 
 interface Point {
   x: number;
@@ -101,11 +167,18 @@ function valueFor(
 
 export function UsageChartLegend({
   providers,
+  className,
 }: {
   providers: readonly UsageProviderKind[];
+  className?: string;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+    <div
+      className={cn(
+        "flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground",
+        className,
+      )}
+    >
       {providers.map((provider) => (
         <span key={provider} className="flex items-center gap-1.5">
           <ProviderMark provider={provider} className="size-3.5" />
@@ -128,6 +201,8 @@ export function UsageProviderChart({
   providers: readonly UsageProviderKind[];
 }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [containerRef, layout] = useChartLayout();
+  const { width, height, plotLeft, plotWidth, plotHeight } = layout;
 
   useEffect(() => {
     setHoverIndex(null);
@@ -138,9 +213,6 @@ export function UsageProviderChart({
     for (const entry of daily) map.set(entry.day, entry);
     return map;
   }, [daily]);
-
-  const plotWidth = VIEW_WIDTH - PLOT_LEFT - PLOT_RIGHT;
-  const plotHeight = VIEW_HEIGHT - PLOT_TOP - PLOT_BOTTOM;
 
   const series = useMemo(() => {
     const columns = days.map((day) => {
@@ -167,10 +239,7 @@ export function UsageProviderChart({
       const points = columns.map((column, index) => {
         const value =
           column.bands.find((band) => band.provider === provider)?.value ?? 0;
-        const x =
-          columns.length <= 1
-            ? PLOT_LEFT + plotWidth / 2
-            : PLOT_LEFT + (index / (columns.length - 1)) * plotWidth;
+        const x = xAt(layout, index, columns.length);
         const y =
           PLOT_TOP +
           plotHeight -
@@ -185,21 +254,38 @@ export function UsageProviderChart({
       return { provider, line, area, points };
     });
     return { columns, scale, providerPaths };
-  }, [byDay, days, metric, plotHeight, plotWidth, providers]);
+  }, [byDay, days, layout, metric, plotHeight, plotWidth, providers]);
 
   const labelIndexes =
     days.length <= 3
       ? days.map((_, index) => index)
       : [0, Math.floor((days.length - 1) / 2), days.length - 1];
 
+  // One handler for mouse hover and touch scrubbing: the nearest day to the
+  // pointer is highlighted. Touch keeps vertical page scrolling (pan-y).
+  const pointToDay = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (days.length === 0) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - bounds.left) / bounds.width) * width;
+    const ratio = plotWidth <= 0 ? 0 : (x - plotLeft) / plotWidth;
+    const index = Math.round(ratio * (days.length - 1));
+    setHoverIndex(Math.min(Math.max(index, 0), days.length - 1));
+  };
+
   return (
-    <div className="relative w-full">
+    <div ref={containerRef} className="relative w-full">
       <svg
-        viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
-        className="h-56 w-full text-muted-foreground"
+        viewBox={`0 0 ${width} ${height}`}
+        width="100%"
+        height={height}
+        className="block touch-pan-y text-muted-foreground select-none"
         role="img"
         aria-label={`Daily ${metric === "cost" ? "cost" : "tokens"} chart`}
-        onMouseLeave={() => setHoverIndex(null)}
+        onPointerDown={pointToDay}
+        onPointerMove={pointToDay}
+        onPointerLeave={(event) => {
+          if (event.pointerType === "mouse") setHoverIndex(null);
+        }}
       >
         {series.scale.ticks.map((tick) => {
           const y =
@@ -209,15 +295,15 @@ export function UsageProviderChart({
           return (
             <g key={tick}>
               <line
-                x1={PLOT_LEFT}
-                x2={VIEW_WIDTH - PLOT_RIGHT}
+                x1={plotLeft}
+                x2={width - PLOT_RIGHT}
                 y1={y}
                 y2={y}
                 stroke="currentColor"
                 strokeOpacity={0.15}
               />
               <text
-                x={PLOT_LEFT - 8}
+                x={plotLeft - 8}
                 y={y + 3}
                 textAnchor="end"
                 className="fill-current text-[10px]"
@@ -240,36 +326,10 @@ export function UsageProviderChart({
           </g>
         ))}
 
-        {days.map((day, index) => {
-          const x =
-            days.length <= 1
-              ? PLOT_LEFT + plotWidth / 2
-              : PLOT_LEFT + (index / (days.length - 1)) * plotWidth;
-          return (
-            <rect
-              key={day}
-              x={x - plotWidth / Math.max(days.length, 1) / 2}
-              y={PLOT_TOP}
-              width={Math.max(plotWidth / Math.max(days.length, 1), 8)}
-              height={plotHeight}
-              fill="transparent"
-              onMouseEnter={() => setHoverIndex(index)}
-            />
-          );
-        })}
-
         {hoverIndex !== null ? (
           <line
-            x1={
-              days.length <= 1
-                ? PLOT_LEFT + plotWidth / 2
-                : PLOT_LEFT + (hoverIndex / (days.length - 1)) * plotWidth
-            }
-            x2={
-              days.length <= 1
-                ? PLOT_LEFT + plotWidth / 2
-                : PLOT_LEFT + (hoverIndex / (days.length - 1)) * plotWidth
-            }
+            x1={xAt(layout, hoverIndex, days.length)}
+            x2={xAt(layout, hoverIndex, days.length)}
             y1={PLOT_TOP}
             y2={PLOT_TOP + plotHeight}
             stroke="currentColor"
@@ -280,16 +340,19 @@ export function UsageProviderChart({
         {labelIndexes.map((index) => {
           const day = days[index];
           if (!day) return null;
-          const x =
-            days.length <= 1
-              ? PLOT_LEFT + plotWidth / 2
-              : PLOT_LEFT + (index / (days.length - 1)) * plotWidth;
+          // Edge labels anchor inward so they are not clipped.
+          const anchor =
+            days.length > 1 && index === 0
+              ? "start"
+              : days.length > 1 && index === days.length - 1
+                ? "end"
+                : "middle";
           return (
             <text
               key={`label-${day}`}
-              x={x}
-              y={VIEW_HEIGHT - 8}
-              textAnchor="middle"
+              x={xAt(layout, index, days.length)}
+              y={height - 6}
+              textAnchor={anchor}
               className="fill-current text-[10px] uppercase tracking-wide"
             >
               {formatDayShort(day)}
@@ -321,6 +384,28 @@ export function UsageProviderChart({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+const SKELETON_BAR_HEIGHTS = [34, 58, 41, 72, 22, 12, 49, 63, 80, 38, 55, 26, 44, 67];
+
+/** Loading placeholder with the same size and axis gutter as the chart. */
+export function UsageChartSkeleton() {
+  const [containerRef, layout] = useChartLayout();
+  return (
+    <div
+      ref={containerRef}
+      className="flex items-end gap-1"
+      style={{ height: layout.height, paddingLeft: layout.plotLeft, paddingBottom: PLOT_BOTTOM }}
+    >
+      {SKELETON_BAR_HEIGHTS.map((barHeight) => (
+        <div
+          key={barHeight}
+          className="flex-1 rounded-sm bg-muted"
+          style={{ height: `${barHeight}%` }}
+        />
+      ))}
     </div>
   );
 }

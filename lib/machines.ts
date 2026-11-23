@@ -268,26 +268,40 @@ export class MachineCollector {
   }
 }
 
+/** A provider data location, naming its machine when there is more than one. */
+export interface DetectedSource {
+  machine: string | null;
+  path: string;
+}
+
+export interface MergedSourceReport {
+  detected: Record<UsageProviderKind, DetectedSource[]>;
+  claudeDirs: SourceReport["claudeDirs"];
+  machines: { name: string; checked: boolean }[];
+}
+
 /**
- * Combine each machine's source report for the settings page. Paths are
- * labeled with their machine when there is more than one; a Claude directory
- * counts as found when any machine has it. `null` marks an unreachable machine.
+ * Combine each machine's source report for the settings page. A Claude
+ * directory counts as found when any machine has it. A `null` report marks an
+ * unreachable machine.
  */
 export function mergeSourceReports(
   claudeDirs: readonly string[],
   reports: readonly { machine: MachineInfo; report: SourceReport | null }[],
-): SourceReport & { machines: { name: string; checked: boolean }[] } {
-  const label = (machine: MachineInfo, path: string) =>
-    reports.length > 1 ? `${machine.name}: ${path}` : path;
+): MergedSourceReport {
+  const labelMachines = reports.length > 1;
   const found = new Set<string>();
   const detected = Object.fromEntries(
     PROVIDER_ORDER.map((provider) => [
       provider,
       reports.flatMap(({ machine, report }) =>
-        (report?.detected[provider] ?? []).map((path) => label(machine, path)),
+        (report?.detected[provider] ?? []).map((path) => ({
+          machine: labelMachines ? machine.name : null,
+          path,
+        })),
       ),
     ]),
-  ) as SourceReport["detected"];
+  ) as MergedSourceReport["detected"];
   for (const { report } of reports) {
     for (const dir of report?.claudeDirs ?? []) if (dir.found) found.add(dir.path);
   }
