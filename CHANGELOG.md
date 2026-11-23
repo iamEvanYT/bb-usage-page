@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Requires bb 0.50 or later. The plugin now uses the `@get-bb/plugin-sdk`
+  npm package instead of vendored SDK declarations.
+
 ## [1.3.0] - 2026-11-19
 
 ### Added

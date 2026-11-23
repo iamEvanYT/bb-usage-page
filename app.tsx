@@ -1,4 +1,4 @@
-import { definePluginApp } from "@bb/plugin-sdk/app";
+import { definePluginApp } from "@get-bb/plugin-sdk/app";
 import { ProviderSettings } from "@/components/usage/provider-settings";
 import { UsagePage } from "@/components/usage/usage-page";
 import "./app.css";

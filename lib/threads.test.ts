@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { BbPluginApi } from "@bb/plugin-sdk";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { applyThreadCatalog, ThreadResolver } from "./threads";
 import type { ThreadTotals } from "./types";
 
