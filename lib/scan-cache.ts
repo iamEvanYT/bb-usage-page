@@ -1,3 +1,4 @@
+import { isPathWithin } from "./host-path";
 import { isValidDay } from "./format";
 import type {
   UsageBucket,
@@ -231,7 +232,7 @@ export function decodeScanCache(document: unknown): ScanCache {
 }
 
 function pathUnderRoot(path: string, root: string): boolean {
-  return path === root || path.startsWith(`${root}/`);
+  return isPathWithin(path, root);
 }
 
 export function pruneScanCache(

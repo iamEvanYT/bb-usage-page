@@ -4,6 +4,7 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 import { isValidTimeZone, makeWindow } from "./lib/format";
+import { displayHomePath } from "./lib/host-path";
 import {
   applyProviderPreferences,
   enabledProviders,
@@ -27,13 +28,6 @@ import {
 import { claudeDirStatus, detectProviderSources, UsageScanner } from "./lib/scan";
 import { ThreadResolver } from "./lib/threads";
 import type { MergedUsage, ProjectTotals, UsageProviderKind } from "./lib/types";
-
-function displayPath(path: string): string {
-  const home = NodeOS.homedir();
-  return path === home || path.startsWith(`${home}${NodePath.sep}`)
-    ? `~${path.slice(home.length)}`
-    : path;
-}
 
 const USAGE_COMMAND = "bb usage show [--days 7|30|90] [--force]";
 
@@ -318,7 +312,7 @@ export default async function plugin(bb: BbPluginApi) {
         detected: Object.fromEntries(
           Object.entries(detected).map(([provider, paths]) => [
             provider,
-            paths.map(displayPath),
+            paths.map((path) => displayHomePath(path, NodeOS.homedir())),
           ]),
         ) as typeof detected,
       };

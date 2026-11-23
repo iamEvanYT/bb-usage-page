@@ -1,6 +1,12 @@
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
+import {
+  isPathWithin,
+  normalizeHostPath,
+  pathBasename,
+  pathSegments,
+} from "./host-path";
 import { CURSOR_ACCOUNT_PROJECT_PATH, type ProjectTotals } from "./types";
 
 const UNKNOWN_PROJECT_LABEL = "Unknown";
@@ -15,19 +21,24 @@ interface ProjectCatalogEntry {
   paths: readonly string[];
 }
 
+/**
+ * Normalize a cwd recorded on the machine running this code (`~` allowed).
+ * Paths from other machines go through `normalizeHostPath` instead.
+ */
 export function normalizeProjectPath(path: string): string {
   const trimmed = path.trim();
   if (trimmed.length === 0) return "";
+  const home = NodeOS.homedir();
   const expanded =
     trimmed === "~"
-      ? NodeOS.homedir()
-      : trimmed.startsWith("~/")
-        ? NodePath.join(NodeOS.homedir(), trimmed.slice(2))
+      ? home
+      : /^~[\\/]/u.test(trimmed)
+        ? NodePath.join(home, trimmed.slice(2))
         : trimmed;
   if (!NodePath.isAbsolute(expanded)) return "";
   const normalized = NodePath.normalize(expanded);
-  if (normalized === "/") return "/";
-  return normalized.replace(/\/+$/, "");
+  if (normalized === NodePath.parse(normalized).root) return normalized;
+  return normalized.replace(/[\\/]+$/u, "");
 }
 
 export function extractCwdFromLine(line: string): string {
@@ -56,16 +67,27 @@ export function extractCwdFromLine(line: string): string {
  * Pi stores them under `.../sessions/<dashed-cwd>/...`.
  * Dashed encoding is lossy for hyphenated folders — prefer transcript cwd.
  */
-export function inferProjectPathFromTranscriptPath(filePath: string): string {
+export function inferProjectPathFromTranscriptPath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
   const encoded =
     encodedDirAfterMarker(filePath, "projects") ||
     encodedDirAfterMarker(filePath, "sessions");
-  if (encoded.length === 0 || !encoded.startsWith("-")) return "";
+  if (encoded.length === 0) return "";
+  if (platform === "win32") {
+    // Windows cwds encode as `C--Users-me-app` (`:` and `\` both become `-`).
+    const drive = /^([A-Za-z])--(.*)$/u.exec(encoded);
+    return drive
+      ? normalizeHostPath(`${drive[1].toUpperCase()}:\\${drive[2].replaceAll("-", "\\")}`)
+      : "";
+  }
+  if (!encoded.startsWith("-")) return "";
   return normalizeProjectPath(encoded.replaceAll("-", "/"));
 }
 
 function encodedDirAfterMarker(filePath: string, marker: string): string {
-  const parts = filePath.split(NodePath.sep);
+  const parts = filePath.split(/[\\/]+/u);
   const index = parts.lastIndexOf(marker);
   if (index === -1) return "";
   const encoded = parts[index + 1];
@@ -76,12 +98,16 @@ function encodedDirAfterMarker(filePath: string, marker: string): string {
 export function fallbackProjectName(projectPath: string): string {
   if (projectPath === CURSOR_ACCOUNT_PROJECT_PATH) return "Cursor (account)";
   if (projectPath.length === 0) return UNKNOWN_PROJECT_LABEL;
-  const base = NodePath.basename(projectPath);
+  const base = pathBasename(projectPath);
   return base.length > 0 ? base : projectPath;
 }
 
-function pathEqualsOrUnder(path: string, root: string): boolean {
-  return path === root || path.startsWith(`${root}/`);
+/** Codex's own chat folder, `~/Documents/Codex`, on any machine. */
+const CODEX_CHATS_RE =
+  /^(?:[A-Za-z]:)?[\\/](?:Users|home)[\\/][^\\/]+[\\/]Documents[\\/]Codex(?:[\\/]|$)/iu;
+
+function isCodexChatsPath(path: string, localRoot: string): boolean {
+  return isPathWithin(path, localRoot) || CODEX_CHATS_RE.test(path);
 }
 
 export function catalogFromBbProjects(
@@ -97,7 +123,7 @@ export function catalogFromBbProjects(
     name: project.name,
     kind: project.kind === "personal" ? "personal" : "standard",
     paths: project.sources
-      .map((source) => normalizeProjectPath(source.path))
+      .map((source) => normalizeHostPath(source.path))
       .filter((path) => path.length > 0),
   }));
 }
@@ -111,7 +137,7 @@ function matchProjectCatalog(
   let bestLength = -1;
   for (const project of catalog) {
     for (const path of project.paths) {
-      if (!pathEqualsOrUnder(projectPath, path)) continue;
+      if (!isPathWithin(projectPath, path)) continue;
       // A personal project rooted at $HOME would swallow every local path.
       if (project.kind === "personal" && projectPath !== path) continue;
       if (path.length > bestLength) {
@@ -132,7 +158,7 @@ function matchProjectByFolder(
   const hits = catalog.filter((project) => {
     if (project.kind !== "standard") return false;
     if (project.name === folder) return true;
-    return project.paths.some((path) => NodePath.basename(path) === folder);
+    return project.paths.some((path) => pathBasename(path) === folder);
   });
   return hits.length === 1 ? hits[0] : null;
 }
@@ -167,7 +193,7 @@ export function applyProjectCatalog(
       }
       continue;
     }
-    if (codexRoot.length > 0 && pathEqualsOrUnder(row.projectPath, codexRoot)) {
+    if (isCodexChatsPath(row.projectPath, codexRoot)) {
       const existing = merged.get(CODEX_CHATS_KEY);
       if (existing) {
         addProjectTotals(existing, row);
@@ -214,7 +240,7 @@ export function applyProjectCatalog(
 }
 
 function isBbManagedWorktreePath(projectPath: string): boolean {
-  const parts = projectPath.split(NodePath.sep);
+  const parts = pathSegments(projectPath);
   const index = parts.lastIndexOf("worktrees");
   if (index <= 0 || parts[index - 1] !== ".bb") return false;
   return ENV_ID_RE.test(parts[index + 1] ?? "");
@@ -223,7 +249,7 @@ function isBbManagedWorktreePath(projectPath: string): boolean {
 function environmentIdFromPersonalWorkspace(
   projectPath: string,
 ): string | null {
-  const parts = projectPath.split(NodePath.sep);
+  const parts = pathSegments(projectPath);
   const index = parts.lastIndexOf("personal-workspaces");
   if (index === -1) return null;
   const id = parts[index + 1];

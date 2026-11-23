@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Requires bb 0.50 or later. The plugin now uses the `@get-bb/plugin-sdk`
   npm package instead of vendored SDK declarations.
 
+### Fixed
+
+- Windows: transcript roots, cache pruning, `~\` paths, and Claude Code's
+  `C--Users-...` project folder encoding are handled.
+- Project rows match bb projects for Windows paths, case-insensitively, and
+  `Documents\Codex` chats on Windows merge into **Unassociated Codex chats**.
+- Unit tests no longer read the real `%APPDATA%` Devin database or assume POSIX
+  paths, so the suite passes on Windows.
+
 ## [1.3.0] - 2026-11-19
 
 ### Added

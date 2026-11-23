@@ -213,9 +213,12 @@ test("OpenCode v1 and v2 rows dedupe by message id and pick up new writes", asyn
     CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
     CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT);
     CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, time_created INTEGER, data TEXT);
-    INSERT INTO session VALUES ('ses_1', '/work/app');
-    INSERT INTO session_v2 VALUES ('ses_1', '/work/app');
   `);
+  // An absolute cwd on whichever platform runs the test.
+  const appDir = path.join(home, "app");
+  for (const table of ["session", "session_v2"]) {
+    database.prepare(`INSERT INTO ${table} VALUES ('ses_1', ?)`).run(appDir);
+  }
   const v1 = (id: string, data: object) =>
     database.prepare("INSERT INTO message VALUES (?, 'ses_1', ?, ?)").run(id, now, JSON.stringify({ role: "assistant", ...data }));
   const v2 = (id: string, data: object) =>
@@ -235,7 +238,7 @@ test("OpenCode v1 and v2 rows dedupe by message id and pick up new writes", asyn
   const opencode = first.merged.providers.find((row) => row.provider === "opencode");
   assert.equal(opencode?.records, 2);
   assert.ok(Math.abs((opencode?.costUsd ?? 0) - 1.7) < 1e-9);
-  assert.equal(first.merged.projects.find((row) => row.projectPath === "/work/app")?.records, 2);
+  assert.equal(first.merged.projects.find((row) => row.projectPath === appDir)?.records, 2);
   assert.equal(first.merged.reasoningTokens, 2);
   assert.equal(first.merged.sources.find((source) => source.provider === "opencode")?.status, "ok");
 
@@ -249,9 +252,13 @@ test("OpenCode v1 and v2 rows dedupe by message id and pick up new writes", asyn
 
 test("Devin sessions dedupe compacted copies, normalize models, and keep titles", async (t) => {
   const home = await mkdtemp(path.join(os.tmpdir(), "usage-devin-test-"));
+  // Windows reads Devin from %APPDATA% first; keep the real one out of the test.
+  const appData = process.env.APPDATA;
+  delete process.env.APPDATA;
   t.after(async () => {
     t.mock.restoreAll();
     syncBuiltinESMExports();
+    if (appData !== undefined) process.env.APPDATA = appData;
     await rm(home, { recursive: true, force: true });
   });
   t.mock.method(os, "homedir", () => home);
@@ -272,8 +279,9 @@ test("Devin sessions dedupe compacted copies, normalize models, and keep titles"
   database.exec(`
     CREATE TABLE sessions (id TEXT PRIMARY KEY, working_directory TEXT, title TEXT);
     CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, chat_message TEXT, created_at INTEGER);
-    INSERT INTO sessions VALUES ('quiet-otter', '/work/app', 'Fix the flaky test');
   `);
+  const appDir = path.join(home, "app");
+  database.prepare("INSERT INTO sessions VALUES ('quiet-otter', ?, 'Fix the flaky test')").run(appDir);
   const seconds = Math.floor(now / 1000);
   const node = (message: object, createdAt = seconds) =>
     database.prepare("INSERT INTO message_nodes (session_id, chat_message, created_at) VALUES ('quiet-otter', ?, ?)")
@@ -307,7 +315,7 @@ test("Devin sessions dedupe compacted copies, normalize models, and keep titles"
   );
   assert.deepEqual(
     merged.threads.filter((row) => row.provider === "devin").map((row) => [row.sessionId, row.title, row.projectPath]),
-    [["quiet-otter", "Fix the flaky test", "/work/app"]],
+    [["quiet-otter", "Fix the flaky test", appDir]],
   );
   assert.equal(merged.sources.find((source) => source.provider === "devin")?.status, "ok");
   await scanner.flush();

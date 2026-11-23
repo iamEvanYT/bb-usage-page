@@ -12,6 +12,7 @@ import {
   localDayStartMs,
   makeWindow,
 } from "./format";
+import { isPathWithin } from "./host-path";
 import {
   readOpenCodeRecords,
   resolveOpenCodeDatabases,
@@ -154,7 +155,7 @@ export interface ScanStats {
 
 function expandHome(path: string): string {
   if (path === "~") return NodeOS.homedir();
-  if (path.startsWith("~/")) {
+  if (/^~[\\/]/u.test(path)) {
     return NodePath.join(NodeOS.homedir(), path.slice(2));
   }
   return path;
@@ -607,9 +608,7 @@ export class UsageScanner {
     const restored = await Promise.all(
       [...this.fileCache].map(async ([path, entry]) => {
         if (byPath.has(path)) return null;
-        if (
-          !roots.some((root) => path === root || path.startsWith(`${root}/`))
-        ) {
+        if (!roots.some((root) => isPathWithin(path, root))) {
           return null;
         }
         const inWindow = entry.records.some((record) => {

@@ -4,7 +4,8 @@ A [bb](https://github.com/get-bb/bb) plugin that shows Claude Code, Codex, Pi,
 Cursor, OpenCode, and Devin usage and estimated API cost — inspired by
 [t3code](https://github.com/pingdotgg/t3code)'s Usage page.
 
-Requires bb `>= 0.50`. Git installs need `npm` on PATH.
+Requires bb `>= 0.50`. Git installs need `npm` on PATH. Works on macOS, Linux,
+and Windows.
 
 ## Install
 
