@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-usage-page",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Usage dashboard for Claude Code, Codex, Pi, Cursor, OpenCode, and Devin in bb.",
   "type": "module",
   "license": "MIT",
