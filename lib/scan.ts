@@ -12,14 +12,13 @@ import {
   localDayStartMs,
   makeWindow,
 } from "./format";
-import { isPathWithin } from "./host-path";
+import { displayHomePath, isPathWithin } from "./host-path";
 import {
   readOpenCodeRecords,
   resolveOpenCodeDatabases,
 } from "./opencode";
 import {
   extractCwdFromLine,
-  fallbackProjectName,
   inferProjectPathFromTranscriptPath,
 } from "./projects";
 import {
@@ -59,8 +58,7 @@ import {
   addTotals,
   EMPTY_TOTALS,
   PROVIDER_ORDER,
-  totalTokens,
-  type MergedUsage,
+  type MachineScan,
   type UsageBucket,
   type UsageProviderKind,
   type UsageRecord,
@@ -80,13 +78,6 @@ const BASE_HOT_TTL_MS = 15_000;
 const BASE_WINDOW_DAYS = 90;
 const CURSOR_BASE_TTL_MS = 15 * 60 * 1000;
 
-const EMPTY_CACHE_STATS = {
-  summaryHit: false,
-  fileHits: 0,
-  fileMisses: 0,
-  filesParsed: 0,
-} as const;
-
 interface TranscriptFile {
   path: string;
   size: number;
@@ -99,7 +90,7 @@ export interface UsageScanDeps {
   log?: (message: string) => void;
 }
 
-export interface ReadSummaryOptions {
+export interface ScanOptions {
   sinceDay: string;
   untilDay: string;
   timeZone: string;
@@ -128,7 +119,7 @@ function cursorDatabasePath(options: CursorScanOptions | undefined): string {
 }
 
 /** Stable identity of the local providers and directories a scan reads. */
-function sourcesKey(input: ReadSummaryOptions): string {
+function sourcesKey(input: ScanOptions): string {
   const enabled = new Set(input.providers ?? PROVIDER_ORDER);
   const providers = PROVIDER_ORDER.filter(
     (provider) => provider !== "cursor" && enabled.has(provider),
@@ -143,14 +134,6 @@ interface FileScanStats {
   fileHits: number;
   fileMisses: number;
   filesParsed: number;
-}
-
-export interface ScanStats {
-  fileHits: number;
-  fileMisses: number;
-  filesParsed: number;
-  summaryHit: boolean;
-  fingerprint: string;
 }
 
 function expandHome(path: string): string {
@@ -356,42 +339,50 @@ async function resolvePiDirs(): Promise<string[]> {
   return existing;
 }
 
-/** Where each provider's local data was found on this machine, if anywhere. */
-export async function detectProviderSources(options: {
-  cursorDatabasePath?: string;
-  claudeDirs?: readonly string[];
-}): Promise<Record<UsageProviderKind, string[]>> {
-  const cursorPath = expandHome(
-    options.cursorDatabasePath?.trim() || defaultCursorDatabasePath(),
-  );
-  const [claude, codex, pi, opencode, devin, cursorFound] = await Promise.all([
+/** Where this machine's provider data was found, for the settings page. */
+export interface SourceReport {
+  /** Paths per provider, with the home directory shown as `~`. */
+  detected: Record<UsageProviderKind, string[]>;
+  /** Whether each configured Claude directory has a projects folder. */
+  claudeDirs: { path: string; found: boolean }[];
+}
+
+export async function reportSources(options: {
+  claudeDirs: readonly string[];
+  /** Cursor is account-wide, so only the server's machine looks for it. */
+  cursor: { databasePath: string } | null;
+}): Promise<SourceReport> {
+  const cursorPath = options.cursor
+    ? expandHome(options.cursor.databasePath.trim() || defaultCursorDatabasePath())
+    : null;
+  const [claude, codex, pi, opencode, devin, cursorFound, claudeDirs] = await Promise.all([
     resolveClaudeDirs(options.claudeDirs),
     resolveCodexDirs(),
     resolvePiDirs(),
     resolveOpenCodeDatabases(),
     resolveDevinDatabases(),
-    pathExists(cursorPath),
+    cursorPath ? pathExists(cursorPath) : false,
+    Promise.all(
+      options.claudeDirs.map(async (path) => ({
+        path,
+        found: (await claudeProjectsDir(NodePath.resolve(expandHome(path.trim())))) !== null,
+      })),
+    ),
   ]);
+  const home = NodeOS.homedir();
+  const display = (paths: readonly string[]) =>
+    paths.map((path) => displayHomePath(path, home));
   return {
-    claude,
-    codex,
-    pi,
-    cursor: cursorFound ? [cursorPath] : [],
-    opencode: opencode.map((database) => database.path),
-    devin: devin.map((database) => database.path),
+    detected: {
+      claude: display(claude),
+      codex: display(codex),
+      pi: display(pi),
+      cursor: cursorFound && cursorPath ? display([cursorPath]) : [],
+      opencode: display(opencode.map((database) => database.path)),
+      devin: display(devin.map((database) => database.path)),
+    },
+    claudeDirs,
   };
-}
-
-/** Whether each configured Claude directory has a readable projects folder. */
-export async function claudeDirStatus(
-  dirs: readonly string[],
-): Promise<{ path: string; found: boolean }[]> {
-  return Promise.all(
-    dirs.map(async (path) => ({
-      path,
-      found: (await claudeProjectsDir(NodePath.resolve(expandHome(path.trim())))) !== null,
-    })),
-  );
 }
 
 type BaseScan = PersistedBaseScan;
@@ -496,12 +487,17 @@ export class UsageScanner {
   async flush(): Promise<void> {
     // Share the read queue so a dispose-triggered flush cannot snapshot cache
     // state while a scan is still mutating it.
-    const run = this.readChain.then(() => this.persistCaches());
+    await this.serialize(() => this.persistCaches());
+  }
+
+  /** Run `task` after every queued read so force/clear cannot race a walk. */
+  private serialize<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.readChain.then(task);
     this.readChain = run.then(
       () => undefined,
       () => undefined,
     );
-    await run;
+    return run;
   }
 
   private async clearDurableCaches(): Promise<void> {
@@ -834,7 +830,7 @@ export class UsageScanner {
     };
   }
 
-  private coveringWindow(input: ReadSummaryOptions): {
+  private coveringWindow(input: ScanOptions): {
     sinceDay: string;
     untilDay: string;
     timeZone: string;
@@ -851,7 +847,7 @@ export class UsageScanner {
 
   private baseCovers(
     base: BaseScan,
-    input: ReadSummaryOptions,
+    input: ScanOptions,
     ratesKey: string,
   ): boolean {
     const cursorEnabled = input.cursor?.enabled === true;
@@ -885,78 +881,39 @@ export class UsageScanner {
     });
   }
 
-  private sliceFromBase(
-    base: BaseScan,
-    input: ReadSummaryOptions,
-    started: number,
-    summaryHit: boolean,
-  ): {
-    summary: UsageSummary;
-    merged: MergedUsage;
-    stats: ScanStats;
-  } {
-    const buckets = base.buckets.filter(
-      (bucket) => bucket.day >= input.sinceDay && bucket.day <= input.untilDay,
-    );
-    const sessionIds = new Set<string>();
-    for (const [day, ids] of base.sessionsByDay) {
-      if (day < input.sinceDay || day > input.untilDay) continue;
-      for (const id of ids) sessionIds.add(id);
-    }
-
-    const summary: UsageSummary = {
-      readAt: new Date().toISOString(),
-      timeZone: input.timeZone,
-      sinceDay: input.sinceDay,
-      untilDay: input.untilDay,
-      buckets,
-      sources: base.sources,
-      pricing: base.pricing,
-      scanDurationMs: Date.now() - started,
-      sessions: sessionIds.size,
-    };
-
-    const merged: MergedUsage = {
-      ...mergeSummary(summary),
-      cache: {
-        summaryHit,
+  /**
+   * This machine's covering scan (at least 90 days, plus the requested
+   * window). Callers slice it to a window and merge it with other machines'.
+   */
+  readScan(input: ScanOptions): Promise<MachineScan> {
+    return this.serialize(async () => {
+      const started = Date.now();
+      const { base, summaryHit } = await this.refreshBase(input);
+      const sessionsByDay: Record<string, string[]> = {};
+      for (const [day, ids] of base.sessionsByDay) sessionsByDay[day] = [...ids];
+      return {
+        sinceDay: base.sinceDay,
+        untilDay: base.untilDay,
+        timeZone: base.timeZone,
+        computedAtMs: base.computedAtMs,
+        buckets: base.buckets,
+        sessionsByDay,
+        sources: base.sources,
+        pricing: base.pricing,
+        fileCount: base.fileCount,
         fileHits: summaryHit ? base.fileCount : base.fileHits,
         fileMisses: summaryHit ? 0 : base.fileMisses,
         filesParsed: summaryHit ? 0 : base.filesParsed,
-      },
-    };
-
-    return {
-      summary,
-      merged,
-      stats: {
-        fileHits: merged.cache.fileHits,
-        fileMisses: merged.cache.fileMisses,
-        filesParsed: merged.cache.filesParsed,
         summaryHit,
-        fingerprint: base.fingerprint,
-      },
-    };
+        scanDurationMs: Date.now() - started,
+      };
+    });
   }
 
-  async readSummary(input: ReadSummaryOptions): Promise<{
-    summary: UsageSummary;
-    merged: MergedUsage;
-    stats: ScanStats;
-  }> {
-    const run = this.readChain.then(() => this.readSummaryUnlocked(input));
-    this.readChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  }
-
-  private async readSummaryUnlocked(input: ReadSummaryOptions): Promise<{
-    summary: UsageSummary;
-    merged: MergedUsage;
-    stats: ScanStats;
-  }> {
+  /** Refresh (or reuse) the covering base scan; callers hold `readChain`. */
+  private async refreshBase(
+    input: ScanOptions,
+  ): Promise<{ base: BaseScan; summaryHit: boolean }> {
     const started = Date.now();
     await this.ensureCachesLoaded();
 
@@ -972,7 +929,7 @@ export class UsageScanner {
     const base = this.baseScan;
     const stale = !base || Date.now() - base.computedAtMs >= BASE_HOT_TTL_MS;
 
-    // Hot path: pure in-memory slice only while the base is fresh. After the
+    // Hot path: reuse the in-memory base only while it is fresh. After the
     // hot TTL, even 7/30 narrows must walk + fingerprint so new transcripts
     // are not stuck until a 90-day request or manual refresh.
     if (
@@ -982,10 +939,7 @@ export class UsageScanner {
       this.databasesReadable(base) &&
       !stale
     ) {
-      this.log(
-        `usage slice ${input.sinceDay}..${input.untilDay} from base ${base.sinceDay}..${base.untilDay} in ${Date.now() - started}ms`,
-      );
-      return this.sliceFromBase(base, input, started, true);
+      return { base, summaryHit: true };
     }
 
     const sinceMs = windowStartMs(cover.sinceDay);
@@ -1047,9 +1001,9 @@ export class UsageScanner {
     ) {
       base.computedAtMs = Date.now();
       this.log(
-        `usage base fingerprint hit; slice ${input.sinceDay}..${input.untilDay} in ${Date.now() - started}ms (${allFiles.length} files)`,
+        `usage base fingerprint hit in ${Date.now() - started}ms (${allFiles.length} files)`,
       );
-      return this.sliceFromBase(base, input, started, true);
+      return { base, summaryHit: true };
     }
 
     // Local transcript changes do not expire Cursor's independently fetched
@@ -1209,13 +1163,12 @@ export class UsageScanner {
 
     await this.persistCaches();
 
-    const sliced = this.sliceFromBase(this.baseScan, input, started, false);
     this.log(
-      `scanned usage base ${cover.sinceDay}..${cover.untilDay}; served ${input.sinceDay}..${input.untilDay} in ${sliced.summary.scanDurationMs}ms ` +
+      `scanned usage base ${cover.sinceDay}..${cover.untilDay} in ${Date.now() - started}ms ` +
         `(${fileHits} cache hits, ${filesParsed} parsed, ${this.baseScan.buckets.length} buckets)`,
     );
 
-    return sliced;
+    return { base: this.baseScan, summaryHit: false };
   }
 }
 
@@ -1331,235 +1284,6 @@ function aggregateBuckets(
         a.projectPath.localeCompare(b.projectPath),
     );
   return { buckets, sessionsByDay };
-}
-
-export function mergeSummary(summary: UsageSummary): MergedUsage {
-  const emptyProvider = () => ({ costUsd: 0, totalTokens: 0 });
-  let costUsd = 0;
-  let uncachedInputTokens = 0;
-  let cachedInputTokens = 0;
-  let cacheCreationTokens = 0;
-  let outputTokens = 0;
-  let reasoningTokens = 0;
-  let records = 0;
-  let cacheSavingsUsdTotal = 0;
-  let providerReportedRecords = 0;
-  let unpricedRecords = 0;
-
-  const providerAccumulator = new Map<
-    UsageProviderKind,
-    { costUsd: number; totalTokens: number; records: number }
-  >();
-  const modelAccumulator = new Map<
-    string,
-    {
-      provider: UsageProviderKind;
-      costUsd: number;
-      totalTokens: number;
-      records: number;
-    }
-  >();
-  const projectAccumulator = new Map<
-    string,
-    { costUsd: number; totalTokens: number; records: number }
-  >();
-  const threadAccumulator = new Map<string, MergedUsage["threads"][number]>();
-  const dailyAccumulator = new Map<
-    string,
-    {
-      costUsd: number;
-      totalTokens: number;
-      byProvider: Record<
-        UsageProviderKind,
-        { costUsd: number; totalTokens: number }
-      >;
-    }
-  >();
-
-  for (const bucket of summary.buckets) {
-    const tokens = totalTokens(bucket.totals);
-    costUsd += bucket.costUsd;
-    cacheSavingsUsdTotal += bucket.cacheSavingsUsd;
-    uncachedInputTokens += bucket.totals.uncachedInputTokens;
-    cachedInputTokens += bucket.totals.cachedInputTokens;
-    cacheCreationTokens += bucket.totals.cacheCreationTokens;
-    outputTokens += bucket.totals.outputTokens;
-    reasoningTokens += bucket.totals.reasoningTokens;
-    records += bucket.records;
-    unpricedRecords += bucket.unpricedRecords;
-    if (bucket.costSource === "providerReported") {
-      providerReportedRecords += bucket.records;
-    }
-
-    const provider = providerAccumulator.get(bucket.provider) ?? {
-      costUsd: 0,
-      totalTokens: 0,
-      records: 0,
-    };
-    provider.costUsd += bucket.costUsd;
-    provider.totalTokens += tokens;
-    provider.records += bucket.records;
-    providerAccumulator.set(bucket.provider, provider);
-
-    const modelKey = `${bucket.provider} ${bucket.model}`;
-    const model = modelAccumulator.get(modelKey) ?? {
-      provider: bucket.provider,
-      costUsd: 0,
-      totalTokens: 0,
-      records: 0,
-    };
-    model.costUsd += bucket.costUsd;
-    model.totalTokens += tokens;
-    model.records += bucket.records;
-    modelAccumulator.set(modelKey, model);
-
-    const project = projectAccumulator.get(bucket.projectPath) ?? {
-      costUsd: 0,
-      totalTokens: 0,
-      records: 0,
-    };
-    project.costUsd += bucket.costUsd;
-    project.totalTokens += tokens;
-    project.records += bucket.records;
-    projectAccumulator.set(bucket.projectPath, project);
-
-    const threadKey = `${bucket.provider}\0${bucket.sessionId}`;
-    const thread = threadAccumulator.get(threadKey) ?? {
-      provider: bucket.provider,
-      sessionId: bucket.sessionId,
-      threadId: null,
-      title: bucket.provider === "cursor"
-        ? "Cursor (account)"
-        : bucket.sessionTitle || bucket.sessionId || "Unattributed usage",
-      projectPath: bucket.projectPath,
-      costUsd: 0,
-      totalTokens: 0,
-      records: 0,
-      costShare: 0,
-    };
-    thread.costUsd += bucket.costUsd;
-    thread.totalTokens += tokens;
-    thread.records += bucket.records;
-    threadAccumulator.set(threadKey, thread);
-
-    const day = dailyAccumulator.get(bucket.day) ?? {
-      costUsd: 0,
-      totalTokens: 0,
-      byProvider: {
-        claude: emptyProvider(),
-        codex: emptyProvider(),
-        pi: emptyProvider(),
-        cursor: emptyProvider(),
-        opencode: emptyProvider(),
-        devin: emptyProvider(),
-      },
-    };
-    day.costUsd += bucket.costUsd;
-    day.totalTokens += tokens;
-    day.byProvider[bucket.provider].costUsd += bucket.costUsd;
-    day.byProvider[bucket.provider].totalTokens += tokens;
-    dailyAccumulator.set(bucket.day, day);
-  }
-
-  for (const provider of PROVIDER_ORDER) {
-    if (!providerAccumulator.has(provider)) {
-      providerAccumulator.set(provider, {
-        costUsd: 0,
-        totalTokens: 0,
-        records: 0,
-      });
-    }
-  }
-
-  const totalTokenCount =
-    uncachedInputTokens +
-    cachedInputTokens +
-    cacheCreationTokens +
-    outputTokens;
-
-  return {
-    costUsd,
-    uncachedInputTokens,
-    cachedInputTokens,
-    cacheCreationTokens,
-    outputTokens,
-    reasoningTokens,
-    totalTokens: totalTokenCount,
-    records,
-    sessions: summary.sessions,
-    providers: [...providerAccumulator.entries()]
-      .map(([provider, totals]) => ({
-        provider,
-        costUsd: totals.costUsd,
-        totalTokens: totals.totalTokens,
-        records: totals.records,
-        costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
-        tokenShare:
-          totalTokenCount === 0 ? 0 : totals.totalTokens / totalTokenCount,
-      }))
-      .sort((a, b) => b.costUsd - a.costUsd),
-    models: [...modelAccumulator.entries()]
-      .map(([key, totals]) => ({
-        model: key.slice(key.indexOf(" ") + 1),
-        provider: totals.provider,
-        costUsd: totals.costUsd,
-        totalTokens: totals.totalTokens,
-        records: totals.records,
-        costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
-      }))
-      .filter((model) => !isIgnoredUsageModel(model.model))
-      .sort(
-        (a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens,
-      ),
-    projects: [...projectAccumulator.entries()]
-      .map(([projectPath, totals]) => ({
-        project: fallbackProjectName(projectPath),
-        projectPath,
-        threadId: null,
-        costUsd: totals.costUsd,
-        totalTokens: totals.totalTokens,
-        records: totals.records,
-        costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
-      }))
-      .sort(
-        (a, b) =>
-          b.costUsd - a.costUsd ||
-          b.totalTokens - a.totalTokens ||
-          a.project.localeCompare(b.project),
-      ),
-    threads: [...threadAccumulator.values()]
-      .map((thread) => ({
-        ...thread,
-        costShare: costUsd === 0 ? 0 : thread.costUsd / costUsd,
-      }))
-      .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens),
-    daily: [...dailyAccumulator.entries()]
-      .map(([day, totals]) => ({
-        day,
-        costUsd: totals.costUsd,
-        totalTokens: totals.totalTokens,
-        byProvider: totals.byProvider,
-      }))
-      .sort((a, b) => a.day.localeCompare(b.day)),
-    costQuality: {
-      providerReportedShare:
-        records === 0 ? 0 : providerReportedRecords / records,
-      unpricedShare: records === 0 ? 0 : unpricedRecords / records,
-      modelPricedShare:
-        records === 0
-          ? 0
-          : (records - providerReportedRecords - unpricedRecords) / records,
-      cacheSavingsUsd: cacheSavingsUsdTotal,
-    },
-    sources: summary.sources,
-    pricing: summary.pricing,
-    scanDurationMs: summary.scanDurationMs,
-    sinceDay: summary.sinceDay,
-    untilDay: summary.untilDay,
-    timeZone: summary.timeZone,
-    readAt: summary.readAt,
-    cache: { ...EMPTY_CACHE_STATS },
-  };
 }
 
 function finalizeSource(source: UsageSource, roots: readonly string[]): void {

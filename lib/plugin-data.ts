@@ -12,3 +12,6 @@ export const RATES_CACHE_FILE = "usage-model-rates.json";
 export function usageDataPath(fileName: string, dataDir: string): string {
   return NodePath.join(dataDir, fileName);
 }
+
+/** Last scan received from each other bb machine, shown while it is offline. */
+export const MACHINE_SCANS_CACHE_FILE = "usage-machine-scans.json";

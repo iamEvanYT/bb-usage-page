@@ -31,6 +31,14 @@ import { PROVIDER_LABEL, ProviderMark } from "./providers";
 
 type Detected = Record<UsageProviderKind, string[]>;
 type DirStatus = ReadonlyMap<string, boolean>;
+/** Where local data was looked for: one machine, every machine, or only reachable ones. */
+type SearchScope = "single" | "all" | "reachable";
+
+function notFoundLabel(provider: UsageProviderKind, scope: SearchScope): string {
+  // Cursor's sign-in is only read on the machine running the bb server.
+  if (provider === "cursor" || scope === "single") return "Not found on this machine";
+  return scope === "all" ? "Not found on any machine" : "Not found on reachable machines";
+}
 
 const SETTLE_MS = 200;
 const SETTLE_EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -51,6 +59,7 @@ export function ProviderSettings() {
   const [draft, setDraft] = useState<UsagePreferences | null>(null);
   const [detected, setDetected] = useState<Detected | null>(null);
   const [claudeStatus, setClaudeStatus] = useState<DirStatus | null>(null);
+  const [searchScope, setSearchScope] = useState<SearchScope>("single");
   const [error, setError] = useState<string | null>(null);
   const saveSeq = useRef(0);
 
@@ -61,6 +70,13 @@ export function ProviderSettings() {
       setDraft((current) => current ?? view.preferences);
       setDetected(view.detected);
       setClaudeStatus(new Map(view.claudeDirs.map((dir) => [dir.path, dir.found])));
+      setSearchScope(
+        view.machines.length <= 1
+          ? "single"
+          : view.machines.every((machine) => machine.checked)
+            ? "all"
+            : "reachable",
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -120,6 +136,7 @@ export function ProviderSettings() {
       <ProviderList
         preferences={draft}
         detected={detected}
+        searchScope={searchScope}
         claudeStatus={claudeStatus}
         onChange={save}
         onReset={reset}
@@ -132,12 +149,14 @@ export function ProviderSettings() {
 function ProviderList({
   preferences,
   detected,
+  searchScope,
   claudeStatus,
   onChange,
   onReset,
 }: {
   preferences: UsagePreferences;
   detected: Detected | null;
+  searchScope: SearchScope;
   claudeStatus: DirStatus | null;
   onChange: (next: UsagePreferences, options?: { redetect?: boolean }) => void;
   onReset: () => void;
@@ -327,6 +346,7 @@ function ProviderList({
             dragging={draggingId === item.id}
             shifting={draggingId !== null && draggingId !== item.id}
             detected={detected?.[item.id]}
+            notFound={notFoundLabel(item.id, searchScope)}
             lockOn={item.enabled && enabledCount === 1}
             rowRef={(node) => {
               if (node) rowRefs.current.set(item.id, node);
@@ -390,6 +410,7 @@ function ProviderRow({
   dragging,
   shifting,
   detected,
+  notFound,
   lockOn,
   rowRef,
   handleRef,
@@ -405,6 +426,7 @@ function ProviderRow({
   dragging: boolean;
   shifting: boolean;
   detected: string[] | undefined;
+  notFound: string;
   lockOn: boolean;
   rowRef: (node: HTMLLIElement | null) => void;
   handleRef: (node: HTMLButtonElement | null) => void;
@@ -422,7 +444,7 @@ function ProviderRow({
       ? PROVIDER_HINT[item.id]
       : found
         ? detected.join(" · ")
-        : `Not found on this machine · ${PROVIDER_HINT[item.id]}`;
+        : `${notFound} · ${PROVIDER_HINT[item.id]}`;
 
   return (
     <li

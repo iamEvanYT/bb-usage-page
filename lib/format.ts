@@ -253,3 +253,13 @@ export function assertValidWindow(input: {
     throw new Error(`Invalid timeZone: ${input.timeZone}`);
   }
 }
+
+/** "just now", "5m ago", "3h ago", or "2d ago" for an ISO time; null reads "never". */
+export function formatAge(iso: string | null, now = Date.now()): string {
+  if (!iso) return "never";
+  const minutes = Math.round((now - Date.parse(iso)) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}

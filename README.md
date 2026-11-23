@@ -5,7 +5,7 @@ Cursor, OpenCode, and Devin usage and estimated API cost — inspired by
 [t3code](https://github.com/pingdotgg/t3code)'s Usage page.
 
 Requires bb `>= 0.50`. Git installs need `npm` on PATH. Works on macOS, Linux,
-and Windows.
+and Windows, and combines usage from every machine enrolled in bb.
 
 ## Install
 
@@ -34,6 +34,8 @@ bb usage show [--days 7|30|90] [--force]
 ## Features
 
 - Sidebar **Usage** panel with 7 / 30 / 90 day windows
+- Usage from every bb machine, with a machine picker (checkboxes, per-machine
+  cost, and **Select all**) to choose which machines count
 - Turn providers on or off and drag them into the order you want under bb
   Settings → Plugins → Usage → Providers. Disabled providers are not read at all
 - Provider split (Codex, Claude Code, Pi, Cursor, OpenCode, Devin), daily chart, and model /
@@ -47,7 +49,7 @@ bb usage show [--days 7|30|90] [--force]
 ## Settings
 
 bb Settings → Plugins → Usage → Providers lists every provider with the data
-it found on this machine. Claude Code, Codex, and Pi are on by default; Cursor,
+it found on each machine, labeled by machine name when there is more than one. Claude Code, Codex, and Pi are on by default; Cursor,
 OpenCode, and Devin start off. Each row has a switch and a drag handle; the handle
 also moves with the arrow keys, Home, and End. The Usage page, chart, legend,
 and Day table follow that order. At least one provider has to stay on, and
@@ -56,8 +58,9 @@ and Day table follow that order. At least one provider has to stay on, and
 Claude Code has a **Directories** list under its row. It starts with
 `~/.claude`; add another config directory, such as the `CLAUDE_CONFIG_DIR`
 of a second account, and its `projects` folder is scanned too. A path that already
-ends in `projects` is read as is. Directories without a projects folder are
-flagged in the list. `CLAUDE_CONFIG_DIR` and `~/.claude.backup` are no longer
+ends in `projects` is read as is. The list applies to every machine, with `~`
+meaning each machine's own home directory. Directories without a projects folder
+on any machine are flagged in the list. `CLAUDE_CONFIG_DIR` and `~/.claude.backup` are no longer
 scanned automatically, so add them here if you rely on them.
 
 Preferences are stored in the plugin's bb key-value storage. Earlier versions
@@ -65,10 +68,34 @@ kept the Cursor switch and auth path in declarative plugin settings; bb hides
 those values once the descriptors are gone, so turn Cursor on again in the
 Providers list after upgrading.
 
-## Data sources
+## Machines
 
-Transcripts are read from the machine running the bb server, not from enrolled
-remote hosts.
+Each bb machine reads its own transcripts and databases, and the server merges
+them. The machine running the bb server is scanned in-process; every other
+enrolled machine is scanned by this plugin's host worker, which bb runs on that
+machine's daemon. Nothing extra needs to be installed there.
+
+When there is more than one machine, the Usage page header shows a machine
+picker. Each row lists the machine's cost (or tokens) for the window, and
+unchecked machines are left out of every total, chart, and breakdown. **Select
+all** brings them all back. The choice is remembered per browser, and machines
+enrolled later are included automatically. At least one machine stays
+selected.
+
+- **Offline machines** show their last successful scan, with a notice and how
+  long ago it ran. A machine that has never been scanned is left out until it
+  comes back online.
+- **Cursor** usage comes from your Cursor account rather than a machine. It is
+  read on the server's machine and counts whichever machines are selected.
+- **The same session on two machines**, such as a synced or copied transcript
+  folder, is counted once: matching day, provider, model, and session keep the
+  larger copy.
+- Remote results are reused for 15 seconds; Refresh / `--force` scans every
+  selected machine again.
+
+`bb usage show` counts every machine and lists each one's total.
+
+## Data sources
 
 | Provider     | Transcripts                                               | Cost                          |
 | ------------ | --------------------------------------------------------- | ----------------------------- |
@@ -108,6 +135,10 @@ All durable state lives in this plugin's bb storage directory,
 | `usage-scan-cache.json` | Per-transcript parse cache (records keyed by path + size + mtime) |
 | `usage-base-cache.json` | Aggregated 90-day buckets/sessions for instant window slices     |
 | `usage-model-rates.json`| Cached LiteLLM pricing table                                     |
+| `usage-machine-scans.json` | Last scan from each other machine, shown while it is offline  |
+
+Other machines keep their own scan, base, and rates caches in this plugin's
+host data directory under their bb data dir.
 
 Refresh / `--force` deletes the scan + base caches and re-reads transcripts.
 Normal scans retain restored transcripts selected by ctime or in-window usage.

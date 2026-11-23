@@ -21,6 +21,7 @@ import {
   formatUsd,
   makeWindow,
 } from "../../lib/format";
+import { MachineNotices, MachinePicker, useExcludedMachines } from "./machines";
 import { PROVIDER_COLOR, PROVIDER_LABEL, ProviderMark } from "./providers";
 import { UsageChartLegend, UsageProviderChart } from "./usage-chart";
 
@@ -43,6 +44,7 @@ export function UsagePage() {
     "model",
   );
   const [merged, setMerged] = useState<MergedUsage | null>(null);
+  const [excludedMachines, setExcludedMachines] = useExcludedMachines();
   const [threadsResolved, setThreadsResolved] = useState(false);
   const includeThreads = breakdown === "thread";
   const detailRows = includeThreads ? merged?.threads ?? [] : merged?.projects ?? [];
@@ -93,6 +95,7 @@ export function UsagePage() {
         untilDay: window.untilDay,
         force,
         includeThreads,
+        ...(excludedMachines.length > 0 ? { excludeMachineIds: excludedMachines } : {}),
       })
       .then((result) => {
         settled = true;
@@ -114,7 +117,15 @@ export function UsagePage() {
       cancelled = true;
       if (force && !settled) forceRefreshRef.current = true;
     };
-  }, [rpc, reloadKey, window.sinceDay, window.timeZone, window.untilDay, windowDays, includeThreads]);
+  }, [rpc, reloadKey, window.sinceDay, window.timeZone, window.untilDay, windowDays, includeThreads, excludedMachines]);
+
+  // A remembered selection can leave nothing selected after machines are
+  // removed or re-enrolled; fall back to every machine.
+  useEffect(() => {
+    if (merged?.machines.length && merged.machines.every((machine) => !machine.selected)) {
+      setExcludedMachines([]);
+    }
+  }, [merged, setExcludedMachines]);
 
   useEffect(() => {
     const nextMidnight = new Date();
@@ -148,6 +159,7 @@ export function UsagePage() {
       ? cursorSource.message || `Cursor usage is ${cursorSource.status}.`
       : null;
   const orderedProviders = merged?.providers ?? [];
+  const machines = merged?.machines ?? [];
 
   const recentDays = useMemo(
     () => (merged ? [...merged.daily].reverse().slice(0, 8) : []),
@@ -173,6 +185,15 @@ export function UsagePage() {
             {formatDayShort(window.sinceDay)} to {formatDayShort(window.untilDay)}
           </p>
           <div className="flex items-center gap-2">
+            {machines.length > 1 ? (
+              <MachinePicker
+                machines={machines}
+                excluded={excludedMachines}
+                onChange={setExcludedMachines}
+                metric={metric}
+                cursorIncluded={visibleProviders.includes("cursor")}
+              />
+            ) : null}
             <div className="flex overflow-hidden rounded-md border border-border">
               {WINDOW_OPTIONS.map((option) => (
                 <button
@@ -216,6 +237,7 @@ export function UsagePage() {
           </div>
         ) : merged ? (
           <>
+            <MachineNotices machines={machines} />
             {cursorWarning ? (
               <div
                 role="status"

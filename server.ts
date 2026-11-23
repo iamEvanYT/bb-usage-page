@@ -3,8 +3,13 @@ import * as NodePath from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
-import { isValidTimeZone, makeWindow } from "./lib/format";
-import { displayHomePath } from "./lib/host-path";
+import { formatAge, isValidTimeZone, makeWindow } from "./lib/format";
+import { hostContract, machineProviders } from "./lib/host-contract";
+import {
+  MachineCollector,
+  mergeSourceReports,
+  type MachineInfo,
+} from "./lib/machines";
 import {
   applyProviderPreferences,
   enabledProviders,
@@ -25,11 +30,17 @@ import {
   preferencesViewSchema,
   usagePreferencesSchema,
 } from "./lib/rpc-schema";
-import { claudeDirStatus, detectProviderSources, UsageScanner } from "./lib/scan";
+import { reportSources, UsageScanner } from "./lib/scan";
+import { combineScans, mergeSummary } from "./lib/summary";
 import { ThreadResolver } from "./lib/threads";
 import type { MergedUsage, ProjectTotals, UsageProviderKind } from "./lib/types";
 
 const USAGE_COMMAND = "bb usage show [--days 7|30|90] [--force]";
+/** A first scan of a large transcript folder on another machine can be slow. */
+const REMOTE_SCAN_TIMEOUT_MS = 5 * 60_000;
+const REMOTE_DETECT_TIMEOUT_MS = 15_000;
+/** Host lifecycle phases with no machine behind them any more. */
+const GONE_HOST_PHASES = new Set(["destroyed", "removing"]);
 
 const daySchema = z
   .string()
@@ -59,6 +70,11 @@ export const rpcContract = defineRpcContract({
         untilDay: daySchema,
         force: z.boolean().optional(),
         includeThreads: z.boolean().optional(),
+        /**
+         * bb machine ids to leave out. Exclusions (not inclusions) keep newly
+         * enrolled machines counted by default.
+         */
+        excludeMachineIds: z.array(z.string().min(1).max(200)).max(256).optional(),
       })
       .strict()
       .refine((value) => value.sinceDay <= value.untilDay, {
@@ -214,16 +230,116 @@ function isPreferredThread(
   return next.attention > current.attention;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Lists every bb machine, the server's own first. Without a host list (or
+ * before the server's daemon enrolls) only the server's machine is listed.
+ */
+function machineLister(bb: BbPluginApi): () => Promise<MachineInfo[]> {
+  let primaryHostId: Promise<string | null> | null = null;
+  return async () => {
+    primaryHostId ??= bb.sdk.system
+      .config()
+      .then((config) => config.primaryHostId)
+      .catch(() => {
+        primaryHostId = null; // Ask again next time.
+        return null;
+      });
+    const localId = await primaryHostId;
+    let hosts: Awaited<ReturnType<BbPluginApi["sdk"]["hosts"]["list"]>> = [];
+    try {
+      hosts = await bb.sdk.hosts.list();
+    } catch (error) {
+      bb.log.warn(`bb machine list unavailable: ${errorMessage(error)}`);
+    }
+    const remote = hosts
+      .filter((host) => host.id !== localId && !GONE_HOST_PHASES.has(host.lifecycle.phase))
+      .map((host) => ({
+        id: host.id,
+        name: host.name,
+        local: false,
+        connected: host.status === "connected",
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const local: MachineInfo = {
+      id: localId ?? "local",
+      name: hosts.find((host) => host.id === localId)?.name ?? NodeOS.hostname(),
+      local: true,
+      connected: true,
+    };
+    return [local, ...remote];
+  };
+}
+
+function cliReport(merged: MergedUsage): string {
+  const cursorSource = merged.sources.find((source) => source.provider === "cursor");
+  const cursorWarning =
+    cursorSource && cursorSource.status !== "ok"
+      ? `Warning: Cursor usage is ${cursorSource.status}: ${
+          cursorSource.message || "source unavailable."
+        }`
+      : null;
+  const cacheLabel = merged.cache.summaryHit
+    ? "summary cache"
+    : `${merged.cache.fileHits} file hits / ${merged.cache.filesParsed} parsed`;
+  const machineState = (machine: MergedUsage["machines"][number]) =>
+    machine.status === "ok"
+      ? `scanned ${formatAge(machine.scannedAt)}`
+      : machine.status === "stale"
+        ? `unreachable, last scanned ${formatAge(machine.scannedAt)}`
+        : "unavailable";
+  const machineLines =
+    merged.machines.length > 1
+      ? [
+          "Machines:",
+          ...merged.machines.map(
+            (machine) =>
+              `  ${machine.name}${machine.local ? " (bb server)" : ""}: $${machine.costUsd.toFixed(2)} (${machine.totalTokens} tokens) · ${machineState(machine)}`,
+          ),
+          ...merged.machines.flatMap((machine) =>
+            machine.message ? [`Warning: ${machine.name}: ${machine.message}`] : [],
+          ),
+        ]
+      : [];
+
+  const lines = [
+    `Usage ${merged.sinceDay} to ${merged.untilDay}`,
+    `Raw token cost: $${merged.costUsd.toFixed(2)}`,
+    ...(cursorWarning ? [cursorWarning] : []),
+    ...merged.providers.map(
+      (provider) =>
+        `  ${provider.provider}: $${provider.costUsd.toFixed(2)} (${provider.totalTokens} tokens)`,
+    ),
+    ...machineLines,
+    ...(merged.projects.length > 0
+      ? [
+          "Projects:",
+          ...merged.projects.map(
+            (project) =>
+              `  ${project.project}: $${project.costUsd.toFixed(2)} (${project.totalTokens} tokens)`,
+          ),
+        ]
+      : []),
+    `Sessions: ${merged.sessions}`,
+    `Scan: ${merged.scanDurationMs}ms · ${cacheLabel} · pricing ${merged.pricing.status}`,
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
 export default async function plugin(bb: BbPluginApi) {
   // The SDK has no plugin-directory accessor, but bb keeps the plugin database
   // at <bb data dir>/plugins/<plugin id>/data.db. Keeping the JSON caches next
   // to it puts them in this plugin's own directory and respects a non-default
   // bb data dir. Opening the database creates an empty data.db as a side effect.
-  const scanner = new UsageScanner({
-    dataDir: NodePath.dirname(bb.storage.database().name),
-    log: (message) => bb.log.info(message),
-  });
+  const dataDir = NodePath.dirname(bb.storage.database().name);
+  const log = (message: string) => bb.log.info(message);
+  const scanner = new UsageScanner({ dataDir, log });
   const threadResolver = new ThreadResolver();
+  const hostClient = bb.hosts.experimental_client({ contract: hostContract });
+  const listMachines = machineLister(bb);
 
   let preferencesCache: Promise<UsagePreferences> | null = null;
 
@@ -238,23 +354,81 @@ export default async function plugin(bb: BbPluginApi) {
     return preferencesCache;
   }
 
-  async function scanOptions() {
+  const collector = new MachineCollector({
+    dataDir,
+    log,
+    listMachines,
+    async scanLocal(request) {
+      const current = await preferences();
+      return scanner.readScan({
+        ...request,
+        cursor: {
+          enabled: request.providers.includes("cursor"),
+          databasePath: current.cursorDatabasePath || undefined,
+        },
+      });
+    },
+    scanRemote(hostId, request) {
+      return hostClient.call(
+        "scan",
+        {
+          sinceDay: request.sinceDay,
+          untilDay: request.untilDay,
+          timeZone: request.timeZone,
+          force: request.force,
+          providers: machineProviders(request.providers),
+          claudeDirs: [...request.claudeDirs],
+        },
+        { hostId, timeoutMs: REMOTE_SCAN_TIMEOUT_MS },
+      );
+    },
+  });
+
+  /** Scan every selected machine and merge them into one usage summary. */
+  async function readUsage(input: {
+    sinceDay: string;
+    untilDay: string;
+    timeZone: string;
+    force: boolean;
+    includeThreads?: boolean;
+    excludeMachineIds?: readonly string[];
+  }): Promise<MergedUsage> {
+    const started = Date.now();
     const current = await preferences();
     const providers = enabledProviders(current);
-    return {
-      providers,
-      claudeDirs: current.claudeDirs,
-      cursor: {
-        enabled: providers.includes("cursor"),
-        databasePath: current.cursorDatabasePath || undefined,
+    const { parts, machines } = await collector.collect(
+      {
+        sinceDay: input.sinceDay,
+        untilDay: input.untilDay,
+        timeZone: input.timeZone,
+        force: input.force,
+        providers,
+        claudeDirs: current.claudeDirs,
       },
-    };
+      { excludeMachineIds: input.excludeMachineIds },
+    );
+    const combined = combineScans(parts, input, {
+      scanDurationMs: Date.now() - started,
+      providers,
+    });
+    return resolveUsage(
+      {
+        ...mergeSummary(combined.summary),
+        cache: combined.cache,
+        machines: machines.map((machine) => ({
+          ...machine,
+          ...(combined.totalsByMachine.get(machine.id) ?? { costUsd: 0, totalTokens: 0 }),
+        })),
+      },
+      providers,
+      input.includeThreads === true,
+    );
   }
 
   async function resolveUsage(
     merged: MergedUsage,
     providers: readonly UsageProviderKind[],
-    includeThreads = false,
+    includeThreads: boolean,
   ): Promise<MergedUsage> {
     merged = applyProviderPreferences(merged, providers);
     let catalog: ReturnType<typeof catalogFromBbProjects> = [];
@@ -272,7 +446,7 @@ export default async function plugin(bb: BbPluginApi) {
         threads = await threadResolver.resolve(bb, threads);
       } catch (error) {
         // Session IDs remain usable when the bb thread catalog is unavailable.
-        bb.log.warn(`Thread usage titles unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        bb.log.warn(`Thread usage titles unavailable: ${errorMessage(error)}`);
       }
     }
     return {
@@ -285,37 +459,42 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
+  /** Where each provider's data was found, on every reachable machine. */
+  async function reportSourcesEverywhere(current: UsagePreferences) {
+    const machines = await listMachines();
+    const reports = await Promise.all(
+      machines.map(async (machine) => {
+        if (machine.local) {
+          const report = await reportSources({
+            claudeDirs: current.claudeDirs,
+            cursor: { databasePath: current.cursorDatabasePath },
+          });
+          return { machine, report };
+        }
+        if (!machine.connected) return { machine, report: null };
+        try {
+          const report = await hostClient.call(
+            "detect",
+            { claudeDirs: current.claudeDirs },
+            { hostId: machine.id, timeoutMs: REMOTE_DETECT_TIMEOUT_MS },
+          );
+          return { machine, report };
+        } catch (error) {
+          log(`usage source detection failed on ${machine.name}: ${errorMessage(error)}`);
+          return { machine, report: null };
+        }
+      }),
+    );
+    return mergeSourceReports(current.claudeDirs, reports);
+  }
+
   bb.rpc.register(rpcContract, {
-    async getUsage({ sinceDay, untilDay, timeZone, force, includeThreads }) {
-      const options = await scanOptions();
-      const { merged } = await scanner.readSummary({
-        sinceDay,
-        untilDay,
-        timeZone,
-        force: force === true,
-        ...options,
-      });
-      return resolveUsage(merged, options.providers, includeThreads);
+    getUsage({ force, ...input }) {
+      return readUsage({ ...input, force: force === true });
     },
     async getPreferences() {
       const current = await preferences();
-      const [detected, claudeDirs] = await Promise.all([
-        detectProviderSources({
-          cursorDatabasePath: current.cursorDatabasePath,
-          claudeDirs: current.claudeDirs,
-        }),
-        claudeDirStatus(current.claudeDirs),
-      ]);
-      return {
-        preferences: current,
-        claudeDirs,
-        detected: Object.fromEntries(
-          Object.entries(detected).map(([provider, paths]) => [
-            provider,
-            paths.map((path) => displayHomePath(path, NodeOS.homedir())),
-          ]),
-        ) as typeof detected,
-      };
+      return { preferences: current, ...(await reportSourcesEverywhere(current)) };
     },
     async setPreferences(input) {
       const next = normalizePreferences(input);
@@ -336,7 +515,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.onDispose(() => scanner.flush());
+  bb.onDispose(async () => {
+    await Promise.all([scanner.flush(), collector.flush()]);
+  });
 
   bb.cli.register({
     name: "usage",
@@ -344,8 +525,8 @@ export default async function plugin(bb: BbPluginApi) {
     commands: [
       {
         name: "show",
-        summary: "Print usage for a window (default 30 days)",
-        usage: "bb usage show [--days 7|30|90] [--force]",
+        summary: "Print usage for a window (default 30 days) across every bb machine",
+        usage: USAGE_COMMAND,
       },
     ],
     async run(argv) {
@@ -353,51 +534,11 @@ export default async function plugin(bb: BbPluginApi) {
       if ("error" in options) {
         return { exitCode: 2, stderr: `${options.error}\n` };
       }
-      const { sinceDay, untilDay, timeZone } = makeWindow(options.days);
-      const scan = await scanOptions();
-      const { merged: scanned } = await scanner.readSummary({
-        sinceDay,
-        untilDay,
-        timeZone,
+      const merged = await readUsage({
+        ...makeWindow(options.days),
         force: options.force,
-        ...scan,
       });
-      const merged = await resolveUsage(scanned, scan.providers);
-      const cursorSource = merged.sources.find(
-        (source) => source.provider === "cursor",
-      );
-      const cursorWarning =
-        cursorSource && cursorSource.status !== "ok"
-          ? `Warning: Cursor usage is ${cursorSource.status}: ${
-              cursorSource.message || "source unavailable."
-            }`
-          : null;
-
-      const cacheLabel = merged.cache.summaryHit
-        ? "summary cache"
-        : `${merged.cache.fileHits} file hits / ${merged.cache.filesParsed} parsed`;
-
-      const lines = [
-        `Usage ${sinceDay} to ${untilDay}`,
-        `Raw token cost: $${merged.costUsd.toFixed(2)}`,
-        ...(cursorWarning ? [cursorWarning] : []),
-        ...merged.providers.map(
-          (provider) =>
-            `  ${provider.provider}: $${provider.costUsd.toFixed(2)} (${provider.totalTokens} tokens)`,
-        ),
-        ...(merged.projects.length > 0
-          ? [
-              "Projects:",
-              ...merged.projects.map(
-                (project) =>
-                  `  ${project.project}: $${project.costUsd.toFixed(2)} (${project.totalTokens} tokens)`,
-              ),
-            ]
-          : []),
-        `Sessions: ${merged.sessions}`,
-        `Scan: ${merged.scanDurationMs}ms · ${cacheLabel} · pricing ${merged.pricing.status}`,
-      ];
-      return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+      return { exitCode: 0, stdout: cliReport(merged) };
     },
   });
 }

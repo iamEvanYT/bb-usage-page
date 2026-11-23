@@ -7,10 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Multi-machine usage. Every bb machine scans its own transcripts and
+  databases through the plugin's host worker, and the server merges them.
+- Machine picker on the Usage page with per-machine cost, checkboxes, and
+  **Select all**. Unchecked machines are remembered per browser; new machines
+  are included automatically.
+- Offline machines show their last successful scan with a notice and its age.
+- `bb usage show` lists each machine's total.
+- Settings → Providers shows where data was found on each machine.
+
 ### Changed
 
 - Requires bb 0.50 or later. The plugin now uses the `@get-bb/plugin-sdk`
   npm package instead of vendored SDK declarations.
+- A session found on two machines (for example a synced transcript folder) is
+  counted once.
 
 ### Fixed
 

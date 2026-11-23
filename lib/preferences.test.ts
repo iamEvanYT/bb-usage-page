@@ -5,7 +5,7 @@ import {
   enabledProviders,
   normalizePreferences,
 } from "./preferences";
-import { mergeSummary } from "./scan";
+import { mergeSummary } from "./summary";
 
 test("preferences keep a full, ordered, deduplicated provider list", () => {
   const defaults = normalizePreferences(undefined);

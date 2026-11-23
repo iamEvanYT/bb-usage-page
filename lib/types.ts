@@ -54,6 +54,56 @@ export interface UsageSource {
   skippedFiles: number;
   distinctSessions: number;
   message: string | null;
+  /** The bb machine this source was read on, when usage spans machines. */
+  machine?: string;
+}
+
+/**
+ * One machine's covering scan (at least 90 days), returned by its host worker
+ * and merged by the server for the machines the viewer selects.
+ */
+export interface MachineScan {
+  sinceDay: string;
+  untilDay: string;
+  timeZone: string;
+  computedAtMs: number;
+  buckets: UsageBucket[];
+  /** Session ids seen on each day, for distinct-session counts. */
+  sessionsByDay: Record<string, string[]>;
+  sources: UsageSource[];
+  pricing: UsageSummary["pricing"];
+  fileCount: number;
+  fileHits: number;
+  fileMisses: number;
+  filesParsed: number;
+  summaryHit: boolean;
+  scanDurationMs: number;
+}
+
+export type MachineStatus =
+  /** Scanned (or served from a fresh cache) for this request. */
+  | "ok"
+  /** Could not be reached; showing its last successful scan. */
+  | "stale"
+  /** Could not be reached and no earlier scan is available. */
+  | "unavailable"
+  /** Not selected, so not scanned for this request. */
+  | "skipped";
+
+export interface MachineSummary {
+  id: string;
+  name: string;
+  /** The machine running the bb server. */
+  local: boolean;
+  connected: boolean;
+  selected: boolean;
+  status: MachineStatus;
+  /** ISO time of the scan behind these numbers, or null when none exists. */
+  scannedAt: string | null;
+  message: string | null;
+  /** Usage in the window, excluding account-wide Cursor usage. */
+  costUsd: number;
+  totalTokens: number;
 }
 
 export interface UsageSummary {
@@ -146,6 +196,8 @@ export interface MergedUsage {
   };
   sources: UsageSource[];
   pricing: UsageSummary["pricing"];
+  /** Every bb machine, with whether it was selected and how it was read. */
+  machines: MachineSummary[];
   scanDurationMs: number;
   sinceDay: string;
   untilDay: string;

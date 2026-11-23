@@ -23,6 +23,7 @@
       "icon": "ChartColumn"
     },
     "server": "./server.ts",
+    "host": "./host.ts",
     "app": "./app.tsx",
     "skills": []
   },
@@ -35,6 +36,7 @@
     "app.tsx",
     "app.css",
     "server.ts",
+    "host.ts",
     "components.json",
     "tsconfig.json"
   ],
